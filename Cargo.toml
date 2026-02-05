@@ -1,0 +1,94 @@
+[package]
+name = "brainfm-presence"
+version = "0.1.0"
+edition = "2021"
+authors = ["Jakub Sládek (xd.js)"]
+description = "Discord Rich Presence for Brain.fm - displays your current focus mode and track"
+license = "MIT"
+repository = "https://github.com/yourusername/brainfm-discord"
+readme = "README.md"
+keywords = ["discord", "brainfm", "rich-presence", "focus", "music"]
+categories = ["multimedia"]
+
+[dependencies]
+# System tray
+tray-icon = "0.21"
+winit = "0.30"
+image = { version = "0.25", default-features = false, features = ["png"] }
+
+# LevelDB for reading local storage
+rusty-leveldb = "4.0"
+
+# JSON parsing
+serde = { version = "1.0", features = ["derive"] }
+serde_json = "1.0"
+
+# Error handling
+anyhow = "1.0"
+thiserror = "2.0"
+
+# Async runtime
+tokio = { version = "1.0", features = ["rt-multi-thread", "time", "sync"] }
+
+# Directories for finding app data
+dirs = "6.0"
+
+# Regex for parsing
+regex = "1.0"
+
+# Discord Rich Presence (pinned to 1.0 - version 1.1.0 has a bug)
+discord-rich-presence = "1.0"
+
+# Time handling
+chrono = "0.4"
+
+# Logging
+log = "0.4"
+env_logger = "0.11"
+
+# macOS frameworks bindings (macOS only)
+[target.'cfg(target_os = "macos")'.dependencies]
+core-foundation = "0.10"
+cocoa = "0.26"
+objc = "0.2"
+
+# Windows dependencies (Windows only)
+[target.'cfg(target_os = "windows")'.dependencies]
+winapi = { version = "0.3", features = ["winuser", "processthreadsapi", "tlhelp32"] }
+
+# Main binary for Discord presence (this is what gets bundled)
+[[bin]]
+name = "brainfm-presence"
+path = "src/bin/discord_rpc.rs"
+
+# Debug binary (not bundled)
+[[bin]]
+name = "brainfm-debug"
+path = "src/main.rs"
+
+# Cargo bundle configuration for macOS .app
+[package.metadata.bundle]
+name = "Brain.fm Presence"
+identifier = "com.brainfm.presence"
+icon = ["assets/icon.icns"]
+short_description = "Discord Rich Presence for Brain.fm"
+long_description = """
+Brain.fm Presence displays your current Brain.fm session in Discord Rich Presence.
+It shows your focus mode, current track, neural effect level, and session duration.
+Runs quietly in your menu bar with no window required.
+"""
+category = "Music"
+osx_minimum_system_version = "10.14"
+
+# Configuration for the main binary
+[package.metadata.bundle.bin.brainfm-presence]
+name = "Brain.fm Presence"
+identifier = "com.brainfm.presence"
+icon = ["assets/icon.icns"]
+
+# Build optimizations for release
+[profile.release]
+lto = true
+codegen-units = 1
+strip = true
+opt-level = "z"
