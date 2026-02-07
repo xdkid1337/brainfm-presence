@@ -64,14 +64,43 @@ fn main() -> Result<()> {
         Err(e) => println!("   ❌ Error: {}", e),
     }
     
-    // Cache reader
-    println!("\n💾 Cache Reader:");
+    // Cache reader (standalone, without API cache enrichment)
+    println!("\n💾 Cache Reader (standalone):");
     match brainfm_presence::cache_reader::read_state(
         &dirs::home_dir()
             .unwrap()
             .join("Library/Application Support/Brain.fm"),
+        None,
     ) {
         Ok(state) => print_state_compact(&state, "   "),
+        Err(e) => println!("   ❌ Error: {}", e),
+    }
+
+    // Direct API client
+    println!("\n🔑 Direct API Client:");
+    let app_path = dirs::home_dir()
+        .unwrap()
+        .join("Library/Application Support/Brain.fm");
+    match brainfm_presence::api_client::fetch_recent_tracks(&app_path) {
+        Ok(Some(data)) => {
+            println!("   ✅ Fetched {} tracks from live API", data.len());
+        }
+        Ok(None) => {
+            println!("   ⏭️  Skipped (token expired or unavailable)");
+        }
+        Err(e) => println!("   ❌ Error: {}", e),
+    }
+
+    // API cache reader (fallback)
+    println!("\n🌐 API Cache Reader (fallback):");
+    match brainfm_presence::api_cache_reader::read_api_cache(&app_path) {
+        Ok(cache) => {
+            if cache.is_empty() {
+                println!("   (no cached API data found)");
+            } else {
+                println!("   ✅ Found {} tracks in disk cache", cache.len());
+            }
+        }
         Err(e) => println!("   ❌ Error: {}", e),
     }
     
@@ -102,13 +131,21 @@ fn print_state(state: &BrainFmState) {
     if let Some(ref track) = state.track_name {
         println!("│ Track:         {:20} │", truncate(track, 20));
     }
-    
+
     if let Some(ref effect) = state.neural_effect {
         println!("│ Neural Effect: {:20} │", truncate(effect, 20));
     }
-    
+
     if let Some(ref genre) = state.genre {
         println!("│ Genre:         {:20} │", genre);
+    }
+
+    if let Some(ref activity) = state.activity {
+        println!("│ Activity:      {:20} │", activity);
+    }
+
+    if let Some(ref image_url) = state.image_url {
+        println!("│ Image:         {:20} │", truncate(image_url, 20));
     }
     
     if state.infinite_play {

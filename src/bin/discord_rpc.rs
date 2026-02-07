@@ -292,6 +292,10 @@ fn format_status(state: &BrainFmState) -> String {
         parts.push(track.clone());
     }
 
+    if let Some(ref genre) = state.genre {
+        parts.push(genre.clone());
+    }
+
     if parts.is_empty() {
         "Playing...".to_string()
     } else {
@@ -306,6 +310,7 @@ fn state_changed(old: &BrainFmState, new: &BrainFmState) -> bool {
         || old.track_name != new.track_name
         || old.neural_effect != new.neural_effect
         || old.genre != new.genre
+        || old.activity != new.activity
 }
 
 /// Update Discord presence with current state
@@ -319,18 +324,33 @@ fn update_discord_presence(
         return Ok(());
     }
 
-    // Build strings: details = track name, state = mode
+    // Build strings: details = track name, state = mode (or activity)
     let state_text = state.mode.clone().unwrap_or_else(|| "Focus".to_string());
     let details = state.track_name.clone().unwrap_or_else(|| "Brain.fm".to_string());
 
-    // Large image = mode from Brain.fm CDN
-    let large_image = match state.mode.as_deref() {
-        Some("Sleep") => "https://cdn.brain.fm/images/sleep/sleep_mental_state_bg_small_aura.webp",
-        Some("Relax") => "https://cdn.brain.fm/images/relax/relax_mental_state_bg_small_aura.webp",
-        Some("Meditate") => "https://cdn.brain.fm/images/meditate/meditate_mental_state_bg_small_aura.webp",
-        _ => "https://cdn.brain.fm/images/focus/focus_mental_state_bg_small_aura.webp",
+    // Large image: prefer track-specific image from API cache, fall back to mode image from CDN
+    let large_image_owned;
+    let large_image = if let Some(ref url) = state.image_url {
+        large_image_owned = url.clone();
+        large_image_owned.as_str()
+    } else {
+        match state.mode.as_deref() {
+            Some("Sleep") | Some("Deep Sleep") | Some("Light Sleep") => {
+                "https://cdn.brain.fm/images/sleep/sleep_mental_state_bg_small_aura.webp"
+            }
+            Some("Relax") | Some("Recharge") | Some("Chill") => {
+                "https://cdn.brain.fm/images/relax/relax_mental_state_bg_small_aura.webp"
+            }
+            Some("Meditate") | Some("Unguided") | Some("Guided") => {
+                "https://cdn.brain.fm/images/meditate/meditate_mental_state_bg_small_aura.webp"
+            }
+            _ => "https://cdn.brain.fm/images/focus/focus_mental_state_bg_small_aura.webp",
+        }
     };
-    let large_text = state.neural_effect.clone().unwrap_or_else(|| "Neural Effect Level".to_string());
+    let large_text = state
+        .neural_effect
+        .clone()
+        .unwrap_or_else(|| "Neural Effect Level".to_string());
 
     // Small image = genre from Brain.fm CDN
     let small_image = match state.genre.as_deref() {

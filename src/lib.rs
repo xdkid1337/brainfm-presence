@@ -1,12 +1,21 @@
 //! Brain.fm information reader
-//! 
+//!
 //! This module provides functionality to read the current state of Brain.fm app
 //! including the active mode (Deep Work, Light Work, etc.), current track, and session time.
+//!
+//! # Data Sources (in priority order)
+//! 1. **Direct API** — Live HTTP call to `api.brain.fm` using JWT from LevelDB (best quality)
+//! 2. **API Cache** — Fallback: structured JSON from cached API responses
+//! 3. **Cache Reader** — Audio URL parsing via `lsof` (real-time play/pause detection)
+//! 4. **LevelDB** — Persisted Redux state (baseline data, may be stale)
 
 use anyhow::Result;
+use log::debug;
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
+pub mod api_cache_reader;
+pub mod api_client;
 pub mod cache_reader;
 pub mod leveldb_reader;
 pub mod platform;
@@ -15,30 +24,36 @@ pub mod tray;
 /// Represents the current state of Brain.fm playback
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
 pub struct BrainFmState {
-    /// Current mode (e.g., "Deep Work", "Light Work", "Motivation", "Sleep", "Relax")
+    /// Current mental state mode (e.g., "Focus", "Sleep", "Relax", "Meditate")
     pub mode: Option<String>,
-    
+
     /// Whether currently playing
     pub is_playing: bool,
-    
-    /// Current track name
+
+    /// Current track name (e.g., "Nothing Remains", "Blooming")
     pub track_name: Option<String>,
-    
-    /// Neural effect level (e.g., "High Neural Effect", "Medium Neural Effect")
+
+    /// Neural effect level display text (e.g., "High Neural Effect")
     pub neural_effect: Option<String>,
-    
-    /// Genre/category (e.g., "PIANO", "ELECTRONIC")
+
+    /// Genre (e.g., "Piano", "Electronic", "Atmospheric")
     pub genre: Option<String>,
-    
+
+    /// Activity within the mode (e.g., "Deep Work", "Creativity", "Recharge")
+    pub activity: Option<String>,
+
+    /// Track image URL (usually from Unsplash, used for Discord large image)
+    pub image_url: Option<String>,
+
     /// Session state (e.g., "IN FOCUS")
     pub session_state: Option<String>,
-    
+
     /// Time in current session (formatted as "H:MM:SS")
     pub session_time: Option<String>,
-    
+
     /// Whether infinite play is enabled
     pub infinite_play: bool,
-    
+
     /// Whether ADHD mode is enabled
     pub adhd_mode: bool,
 }
@@ -48,10 +63,25 @@ impl BrainFmState {
     pub fn new() -> Self {
         Self::default()
     }
-    
+
     /// Check if Brain.fm is actively playing
     pub fn is_active(&self) -> bool {
         self.is_playing && self.mode.is_some()
+    }
+
+    /// Set mode from API cache metadata.
+    ///
+    /// The API distinguishes between "mental state" (Focus, Sleep, Relax, Meditate)
+    /// and "activity" (Deep Work, Creativity, Recharge, etc.).
+    /// For Discord presence, we use the activity as the mode when it's a known
+    /// sub-mode, and fall back to the mental state.
+    pub fn mental_state_or_mode(&mut self, metadata: &crate::api_cache_reader::TrackMetadata) {
+        // Use the activity as our display mode if it's specific enough
+        if let Some(ref activity) = metadata.activity {
+            self.mode = Some(activity.clone());
+        } else if let Some(ref ms) = metadata.mental_state {
+            self.mode = Some(ms.clone());
+        }
     }
     
     /// Get a display string for Discord Rich Presence
@@ -77,22 +107,25 @@ impl BrainFmState {
         }
     }
     
-    /// Get details string for Discord Rich Presence
+    /// Get details string for Discord Rich Presence.
+    ///
+    /// Format: "Track Name • Genre • Neural Effect"
+    /// Example: "Nothing Remains • Piano • High Neural Effect"
     pub fn to_details_string(&self) -> Option<String> {
         let mut parts = Vec::new();
-        
+
         if let Some(ref track) = self.track_name {
             parts.push(track.clone());
         }
-        
-        if let Some(ref effect) = self.neural_effect {
-            parts.push(effect.clone());
-        }
-        
+
         if let Some(ref genre) = self.genre {
             parts.push(genre.clone());
         }
-        
+
+        if let Some(ref effect) = self.neural_effect {
+            parts.push(effect.clone());
+        }
+
         if parts.is_empty() {
             None
         } else {
@@ -113,63 +146,96 @@ impl BrainFmReader {
         let app_support_path = platform::get_brainfm_data_dir()?;
         Ok(Self { app_support_path })
     }
-    
+
     /// Check if Brain.fm is running
     pub fn is_running(&self) -> bool {
         platform::is_brainfm_running()
     }
-    
-    /// Read current state using all available methods
+
+    /// Read current state using all available methods.
+    ///
+    /// Priority order:
+    /// 1. LevelDB — baseline data (mode, ADHD mode), may be stale
+    /// 2. Disk cache → Direct API — structured metadata lookup table
+    /// 3. Cache Reader — real-time audio URL detection via `lsof` + metadata enrichment
     pub fn read_state(&self) -> Result<BrainFmState> {
         let mut state = BrainFmState::new();
-        
+
         // Check if app is running
         if !self.is_running() {
             return Ok(state);
         }
-        
-        // Don't hardcode is_playing here — let the scrapers determine it.
-        // The cache reader uses lsof to detect play/pause state.
-        
-        // Read sources in order of reliability:
-        // - LevelDB: Baseline data (may be stale for mode)
-        // - Cache: Best for track info and mode from audio URLs
-        
+
         // 1. LevelDB (baseline data, may be stale)
         if let Ok(leveldb_state) = self.read_from_leveldb() {
-            state = self.merge_state(state, leveldb_state);
+            state = Self::merge_state(state, leveldb_state);
         }
-        
-        // 2. Cache (HIGHEST PRIORITY - has current track and mode from URL)
-        // Also provides authoritative play/pause state via lsof
-        if let Ok(cache_state) = self.read_from_cache() {
-            state = self.merge_state(state, cache_state);
+
+        // 2. Try disk cache first (instant, no network)
+        let disk_cache = api_cache_reader::read_api_cache(&self.app_support_path).ok();
+
+        if let Some(ref cache) = disk_cache {
+            if !cache.is_empty() {
+                debug!("Disk cache: {} tracks available", cache.len());
+            }
         }
-        
+
+        // 3. Cache reader with disk cache for enrichment
+        if let Ok(cache_state) = cache_reader::read_state(
+            &self.app_support_path,
+            disk_cache.as_ref(),
+        ) {
+            // If we got full metadata from disk cache, we're done
+            if cache_state.track_name.is_some() && cache_state.neural_effect.is_some()
+                && cache_state.neural_effect.as_deref() != Some("Neural Effect Level")
+            {
+                debug!("Disk cache hit — skipping API call");
+                state = Self::merge_state(state, cache_state);
+                return Ok(state);
+            }
+
+            // Track not in disk cache (or incomplete metadata) → try API
+            if cache_state.is_playing {
+                debug!("Track not in disk cache — trying Direct API");
+                if let Ok(Some(api_data)) = api_client::fetch_recent_tracks(&self.app_support_path) {
+                    if !api_data.is_empty() {
+                        debug!("Direct API: {} tracks loaded", api_data.len());
+                        // Re-run cache reader with API data for enrichment
+                        if let Ok(enriched_state) = cache_reader::read_state(
+                            &self.app_support_path,
+                            Some(&api_data),
+                        ) {
+                            state = Self::merge_state(state, enriched_state);
+                            return Ok(state);
+                        }
+                    }
+                }
+            }
+
+            // Fallback: use whatever we got from the first pass
+            state = Self::merge_state(state, cache_state);
+        }
+
         Ok(state)
     }
-    
+
     /// Read from LevelDB local storage
     fn read_from_leveldb(&self) -> Result<BrainFmState> {
         leveldb_reader::read_state(&self.app_support_path)
     }
-    
-    /// Read from Cache
-    fn read_from_cache(&self) -> Result<BrainFmState> {
-        cache_reader::read_state(&self.app_support_path)
-    }
-    
+
     /// Merge two states, preferring non-None values from the overlay state.
-    /// For is_playing: overlay wins (cache reader is authoritative for play/pause).
-    fn merge_state(&self, base: BrainFmState, overlay: BrainFmState) -> BrainFmState {
+    ///
+    /// For `is_playing`: overlay always wins (cache reader is authoritative for play/pause).
+    fn merge_state(base: BrainFmState, overlay: BrainFmState) -> BrainFmState {
         BrainFmState {
             mode: overlay.mode.or(base.mode),
-            // Overlay (higher priority) determines play/pause state.
-            // Cache reader sets is_playing based on lsof (true = playing, false = paused).
             is_playing: overlay.is_playing,
             track_name: overlay.track_name.or(base.track_name),
             neural_effect: overlay.neural_effect.or(base.neural_effect),
             genre: overlay.genre.or(base.genre),
+            activity: overlay.activity.or(base.activity),
+            image_url: overlay.image_url.or(base.image_url),
             session_state: overlay.session_state.or(base.session_state),
             session_time: overlay.session_time.or(base.session_time),
             infinite_play: overlay.infinite_play || base.infinite_play,

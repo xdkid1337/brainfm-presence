@@ -1,13 +1,23 @@
 //! Cache reader for Brain.fm
-//! 
+//!
 //! Scans the Electron network cache for audio file URLs to determine
 //! the currently playing track and its metadata.
+//!
+//! # Enrichment Strategy
+//!
+//! When an audio URL is found via `lsof`, we first try to look it up
+//! in the API cache for rich, structured metadata (track name, genre,
+//! NEL, activity). Only falls back to heuristic filename parsing when
+//! no API cache match is available.
 
 use anyhow::Result;
+use log::debug;
 use regex::Regex;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+
+use crate::api_cache_reader::ApiCacheData;
 use crate::BrainFmState;
 
 /// Simple URL decode for common patterns (mainly %20 for space)
@@ -19,25 +29,28 @@ fn url_decode(s: &str) -> String {
      .replace("%26", "&")
 }
 
-/// Read state from Cache directory
-pub fn read_state(app_support_path: &Path) -> Result<BrainFmState> {
+/// Read state from Cache directory.
+///
+/// Accepts an optional `ApiCacheData` reference for enriching the detected
+/// audio URL with structured metadata from cached API responses.
+pub fn read_state(app_support_path: &Path, api_cache: Option<&ApiCacheData>) -> Result<BrainFmState> {
     let cache_path = app_support_path
         .join("Cache")
         .join("Cache_Data");
-    
+
     if !cache_path.exists() {
         anyhow::bail!("Cache path not found: {:?}", cache_path);
     }
-    
+
     let mut state = BrainFmState::new();
-    
+
     // Use lsof as the authoritative play/pause signal.
     // When Brain.fm is playing, it holds Cache_Data file handles open.
     // When paused, it releases ALL Cache_Data handles (count drops to 0).
     match find_audio_url_via_lsof(&cache_path)? {
         Some(url) => {
             // lsof found open Cache_Data files with an audio URL = actively playing
-            state = parse_audio_url(&url, state);
+            state = enrich_from_url(&url, state, api_cache);
             return Ok(state);
         }
         None => {
@@ -46,14 +59,40 @@ pub fn read_state(app_support_path: &Path) -> Result<BrainFmState> {
                 // Process has cache files open but we couldn't extract a URL.
                 // Fallback: scan cache files by access time.
                 if let Some(url) = find_audio_url_by_atime(&cache_path)? {
-                    state = parse_audio_url(&url, state);
+                    state = enrich_from_url(&url, state, api_cache);
                 }
             }
             // else: no Cache_Data files open at all = paused (is_playing stays false)
         }
     }
-    
+
     Ok(state)
+}
+
+/// Enrich state from an audio URL.
+///
+/// Strategy:
+/// 1. Try API cache lookup first (structured data, 100% accurate)
+/// 2. Fall back to heuristic filename parsing (lossy but always available)
+fn enrich_from_url(url: &str, mut state: BrainFmState, api_cache: Option<&ApiCacheData>) -> BrainFmState {
+    // Strategy 1: API cache lookup (rich structured metadata)
+    if let Some(cache) = api_cache {
+        if let Some(metadata) = cache.lookup_by_url(url) {
+            debug!("API cache hit for URL: track='{}'", metadata.name);
+            state.track_name = Some(metadata.name.clone());
+            state.genre = metadata.genre.clone();
+            state.neural_effect = metadata.neural_effect.clone();
+            state.mental_state_or_mode(&metadata);
+            state.activity = metadata.activity.clone();
+            state.image_url = metadata.image_url.clone();
+            state.is_playing = true;
+            return state;
+        }
+        debug!("API cache miss for URL, falling back to filename parsing");
+    }
+
+    // Strategy 2: Fallback to heuristic filename parsing
+    parse_audio_url(url, state)
 }
 
 /// Check if Brain.fm has ANY Cache_Data files open (play/pause signal).
