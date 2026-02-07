@@ -12,7 +12,7 @@
 //! 4. **LevelDB** — Persisted Redux state (baseline data, may be stale)
 
 use anyhow::Result;
-use log::debug;
+use log::{debug, warn};
 use serde::{Deserialize, Serialize};
 use std::path::PathBuf;
 
@@ -140,6 +140,10 @@ impl BrainFmState {
     }
 }
 
+/// Number of read_state cycles between periodic API refreshes.
+/// With a 5-second update interval, this means ~30 seconds between refreshes.
+const API_REFRESH_INTERVAL: u32 = 6;
+
 /// Main reader that combines multiple data sources
 pub struct BrainFmReader {
     /// Path to Brain.fm app support directory
@@ -147,6 +151,14 @@ pub struct BrainFmReader {
     
     /// In-memory cache of API responses to persist metadata even if token expires
     memory_cache: api_cache_reader::ApiCacheData,
+
+    /// Counts cycles since the last successful API call.
+    /// When this reaches `API_REFRESH_INTERVAL`, a periodic refresh is triggered.
+    api_refresh_counter: u32,
+
+    /// The audio URL (or track name) that was last enriched via the Direct API.
+    /// Used to detect track changes and trigger immediate API calls.
+    last_api_track: Option<String>,
 }
 
 impl BrainFmReader {
@@ -154,7 +166,12 @@ impl BrainFmReader {
     pub fn new() -> Result<Self> {
         let app_support_path = platform::get_brainfm_data_dir()?;
         let memory_cache = api_cache_reader::ApiCacheData::new();
-        Ok(Self { app_support_path, memory_cache })
+        Ok(Self {
+            app_support_path,
+            memory_cache,
+            api_refresh_counter: API_REFRESH_INTERVAL, // trigger API on first cycle
+            last_api_track: None,
+        })
     }
 
     /// Check if Brain.fm is running
@@ -164,13 +181,12 @@ impl BrainFmReader {
 
     /// Read current state using all available methods.
     ///
-    /// Read current state using all available methods.
-    ///
     /// Priority order:
     /// 1. LevelDB — baseline data (mode, ADHD mode), may be stale
-    /// 2. Memory Cache + Disk cache → Direct API — structured metadata lookup table
-    /// 3. Cache Reader — real-time audio URL detection via `lsof` + metadata enrichment
-    /// 4. MediaRemote — macOS Now Playing fallback when `lsof` detection fails
+    /// 2. Cache Reader — real-time audio URL detection via `lsof`
+    /// 3. Direct API — called on track change or periodic refresh for fresh metadata
+    /// 4. Memory Cache + Disk cache — fallback when API is unavailable
+    /// 5. MediaRemote — macOS Now Playing fallback when `lsof` detection fails
     pub fn read_state(&mut self) -> Result<BrainFmState> {
         let mut state = BrainFmState::new();
 
@@ -184,11 +200,46 @@ impl BrainFmReader {
             state = Self::merge_state(state, leveldb_state);
         }
 
-        // 2. Prepare combined cache (Memory + Disk)
-        // Combine persisted memory cache with latest disk cache
+        // 2. Fast path: if we already have complete metadata in memory cache
+        //    for the current track, just use MediaRemote for play/pause detection
+        //    and skip expensive disk cache parsing + lsof scanning.
+        if !self.memory_cache.is_empty() {
+            if let Some(mr_state) = media_remote_reader::read_state() {
+                let current_track = mr_state.track_name.clone();
+                let track_changed = current_track != self.last_api_track;
+
+                if mr_state.is_playing {
+                    // Try to enrich from memory cache
+                    if let Some(ref title) = current_track {
+                        if let Some(metadata) = self.memory_cache.lookup_by_name(title) {
+                            let has_complete = metadata.neural_effect.is_some()
+                                && metadata.image_url.is_some();
+
+                            if !track_changed && has_complete {
+                                // Fast path: same track, complete data — no I/O needed
+                                debug!("Fast path: '{}' fully cached in memory, skipping disk I/O", title);
+                                state.is_playing = true;
+                                state.track_name = Some(metadata.name.clone());
+                                state.genre = metadata.genre.clone().or(state.genre);
+                                state.neural_effect = metadata.neural_effect.clone().or(state.neural_effect);
+                                state.mental_state_or_mode(metadata);
+                                state.activity = metadata.activity.clone().or(state.activity);
+                                state.image_url = metadata.image_url.clone().or(state.image_url);
+                                return Ok(state);
+                            }
+                        }
+                    }
+                } else if !track_changed && self.last_api_track.is_some() {
+                    // MediaRemote says not playing, same track context — quick not-playing
+                    debug!("Fast path: not playing");
+                    return Ok(state);
+                }
+            }
+        }
+
+        // 3. Full path: read disk cache + lsof (needed for first detection or incomplete data)
         let mut combined_cache = self.memory_cache.clone();
         
-        // Try reading disk cache
         if let Ok(disk_cache) = api_cache_reader::read_api_cache(&self.app_support_path) {
             combined_cache.merge(&disk_cache);
         }
@@ -198,72 +249,111 @@ impl BrainFmReader {
                 combined_cache.len(), self.memory_cache.len(), combined_cache.len());
         }
 
-        // 3. Cache reader with combined cache for enrichment
-        if let Ok(cache_state) = cache_reader::read_state(
+        // 4. Cache reader — detect what's currently playing via lsof
+        let cache_state = match cache_reader::read_state(
             &self.app_support_path,
             Some(&mut combined_cache),
         ) {
-            // If we got full metadata from cache, we're done
-            if cache_state.track_name.is_some() && cache_state.neural_effect.is_some()
-                && cache_state.neural_effect.as_deref() != Some("Neural Effect Level")
-            {
-                debug!("Cache hit — skipping API call");
-                state = Self::merge_state(state, cache_state);
-                return Ok(state);
+            Ok(s) => s,
+            Err(e) => {
+                debug!("Cache reader error: {}", e);
+                BrainFmState::new()
             }
+        };
 
-            // Track not in cache (or incomplete metadata) → try API
-            if cache_state.is_playing {
-                debug!("Track not in cache — trying Direct API");
-                if let Ok(Some(api_data)) = api_client::fetch_recent_tracks(&self.app_support_path) {
-                    if !api_data.is_empty() {
-                        debug!("Direct API: {} tracks loaded", api_data.len());
-                        
-                        // Update memory cache with new data
-                        self.memory_cache.merge(&api_data);
-                        
-                        // Update combined cache for immediate use
-                        combined_cache.merge(&api_data);
-                        
-                        // Re-run cache reader with enriched data
-                        if let Ok(enriched_state) = cache_reader::read_state(
-                            &self.app_support_path,
-                            Some(&mut combined_cache),
-                        ) {
-                            state = Self::merge_state(state, enriched_state);
-                            return Ok(state);
-                        }
-                    }
-                }
+        // 5. Determine if playing — lsof is primary, MediaRemote is fallback
+        let (is_playing, current_track_key, detection_source) = if cache_state.is_playing {
+            let track_key = cache_state.track_name.clone();
+            (true, track_key, "lsof")
+        } else if let Some(mr_state) = media_remote_reader::read_state() {
+            if mr_state.is_playing {
+                debug!("MediaRemote: Brain.fm is playing (lsof missed it)");
+                let track_key = mr_state.track_name.clone();
+                (true, track_key, "MediaRemote")
+            } else {
+                (false, None, "none")
             }
+        } else {
+            (false, None, "none")
+        };
 
-            // Fallback: use whatever we got from the first pass
+        if !is_playing {
             state = Self::merge_state(state, cache_state);
+            return Ok(state);
         }
 
-        // 4. MediaRemote fallback — if lsof didn't detect playback, ask macOS
-        if !state.is_playing {
-            if let Some(mr_state) = media_remote_reader::read_state() {
-                if mr_state.is_playing {
-                    debug!("MediaRemote: Brain.fm is playing (lsof missed it)");
-                    state.is_playing = true;
+        // 6. Decide whether to call the Direct API:
+        //    - ALWAYS on track change (new song needs fresh metadata)
+        //    - Periodically every N cycles ONLY if metadata is incomplete
+        self.api_refresh_counter += 1;
+        let track_changed = current_track_key != self.last_api_track;
 
-                    // Try to enrich with cached metadata using the track name
-                    if let Some(ref title) = mr_state.track_name {
-                        if let Some(metadata) = combined_cache.lookup_by_name(title) {
-                            debug!("MediaRemote: cache hit for '{}'", title);
-                            state.track_name = Some(metadata.name.clone());
-                            state.genre = metadata.genre.clone().or(state.genre);
-                            state.neural_effect = metadata.neural_effect.clone().or(state.neural_effect);
-                            state.mental_state_or_mode(metadata);
-                            state.activity = metadata.activity.clone().or(state.activity);
-                            state.image_url = metadata.image_url.clone().or(state.image_url);
-                        } else {
-                            // No cache match — use the raw title from MediaRemote
-                            debug!("MediaRemote: no cache match for '{}', using raw title", title);
-                            state.track_name = Some(title.clone());
-                        }
-                    }
+        // Check if current data is incomplete (missing key fields)
+        let has_complete_metadata = cache_state.track_name.is_some()
+            && cache_state.neural_effect.is_some()
+            && cache_state.image_url.is_some();
+        let periodic_refresh = !has_complete_metadata
+            && self.api_refresh_counter >= API_REFRESH_INTERVAL;
+
+        let should_call_api = track_changed || periodic_refresh;
+
+        if should_call_api {
+            if track_changed {
+                debug!("Track changed ({:?} → {:?}), calling API for fresh metadata [detected by {}]",
+                    self.last_api_track, current_track_key, detection_source);
+            } else {
+                debug!("Incomplete metadata, periodic API refresh (cycle {}) [detected by {}]",
+                    self.api_refresh_counter, detection_source);
+            }
+
+            match api_client::fetch_recent_tracks(&self.app_support_path) {
+                Ok(Some(api_data)) if !api_data.is_empty() => {
+                    debug!("Direct API: {} tracks loaded", api_data.len());
+                    
+                    // Update memory cache with fresh data
+                    self.memory_cache.merge(&api_data);
+                    combined_cache.merge(&api_data);
+                    self.api_refresh_counter = 0;
+                    self.last_api_track = current_track_key.clone();
+                }
+                Ok(Some(_)) => {
+                    debug!("API returned empty result");
+                }
+                Ok(None) => {
+                    warn!("API unavailable (token expired or not found), using cached data");
+                }
+                Err(e) => {
+                    warn!("API error: {}, using cached data", e);
+                }
+            }
+        }
+
+        // 7. Enrich track data depending on detection source
+        if detection_source == "lsof" {
+            // Re-run cache reader with (potentially) API-enriched combined cache
+            if let Ok(enriched_state) = cache_reader::read_state(
+                &self.app_support_path,
+                Some(&mut combined_cache),
+            ) {
+                state = Self::merge_state(state, enriched_state);
+            } else {
+                state = Self::merge_state(state, cache_state);
+            }
+        } else {
+            // MediaRemote detected — enrich track name via cache lookup
+            state.is_playing = true;
+            if let Some(ref title) = current_track_key {
+                if let Some(metadata) = combined_cache.lookup_by_name(title) {
+                    debug!("MediaRemote: enriched '{}' from cache/API", title);
+                    state.track_name = Some(metadata.name.clone());
+                    state.genre = metadata.genre.clone().or(state.genre);
+                    state.neural_effect = metadata.neural_effect.clone().or(state.neural_effect);
+                    state.mental_state_or_mode(metadata);
+                    state.activity = metadata.activity.clone().or(state.activity);
+                    state.image_url = metadata.image_url.clone().or(state.image_url);
+                } else {
+                    debug!("MediaRemote: no cache/API match for '{}', using raw title", title);
+                    state.track_name = Some(title.clone());
                 }
             }
         }
