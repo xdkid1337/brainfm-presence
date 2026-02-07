@@ -167,7 +167,7 @@ fn load_icon() -> Icon {
 /// Background worker that reads Brain.fm state and updates Discord
 fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, shutdown_rx: mpsc::Receiver<()>) {
     // Create Brain.fm reader
-    let reader = match BrainFmReader::new() {
+    let mut reader = match BrainFmReader::new() {
         Ok(r) => r,
         Err(e) => {
             error!("Failed to create Brain.fm reader: {}", e);

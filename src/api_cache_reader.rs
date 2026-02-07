@@ -66,6 +66,13 @@ pub struct ApiCacheData {
 }
 
 impl ApiCacheData {
+    /// Create a new empty cache
+    pub fn new() -> Self {
+        Self {
+            tracks: HashMap::new(),
+        }
+    }
+
     /// Look up metadata by matching the audio URL's filename against cached data.
     ///
     /// The match is done against the filename portion of the URL (after the last `/`),
@@ -104,6 +111,21 @@ impl ApiCacheData {
     /// Whether the cache is empty
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
+    }
+
+    /// Merge another ApiCacheData into this one, overwriting existing entries.
+    pub fn merge(&mut self, other: &ApiCacheData) {
+        for (key, value) in &other.tracks {
+            self.tracks.insert(key.clone(), value.clone());
+        }
+    }
+}
+
+impl Clone for ApiCacheData {
+    fn clone(&self) -> Self {
+        Self {
+            tracks: self.tracks.clone(),
+        }
     }
 }
 

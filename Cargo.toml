@@ -1,6 +1,6 @@
 [package]
 name = "brainfm-presence"
-version = "0.9.8"
+version = "1.0.0"
 edition = "2021"
 authors = ["Jakub Sládek (xd.js)"]
 description = "Discord Rich Presence for Brain.fm - displays your current focus mode and track"

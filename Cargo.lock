@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "brainfm-presence"
-version = "0.9.8"
+version = "1.0.0"
 dependencies = [
  "anyhow",
  "base64",

@@ -138,13 +138,17 @@ impl BrainFmState {
 pub struct BrainFmReader {
     /// Path to Brain.fm app support directory
     app_support_path: PathBuf,
+    
+    /// In-memory cache of API responses to persist metadata even if token expires
+    memory_cache: api_cache_reader::ApiCacheData,
 }
 
 impl BrainFmReader {
     /// Create a new reader
     pub fn new() -> Result<Self> {
         let app_support_path = platform::get_brainfm_data_dir()?;
-        Ok(Self { app_support_path })
+        let memory_cache = api_cache_reader::ApiCacheData::new();
+        Ok(Self { app_support_path, memory_cache })
     }
 
     /// Check if Brain.fm is running
@@ -154,11 +158,13 @@ impl BrainFmReader {
 
     /// Read current state using all available methods.
     ///
+    /// Read current state using all available methods.
+    ///
     /// Priority order:
     /// 1. LevelDB — baseline data (mode, ADHD mode), may be stale
-    /// 2. Disk cache → Direct API — structured metadata lookup table
+    /// 2. Memory Cache + Disk cache → Direct API — structured metadata lookup table
     /// 3. Cache Reader — real-time audio URL detection via `lsof` + metadata enrichment
-    pub fn read_state(&self) -> Result<BrainFmState> {
+    pub fn read_state(&mut self) -> Result<BrainFmState> {
         let mut state = BrainFmState::new();
 
         // Check if app is running
@@ -171,39 +177,51 @@ impl BrainFmReader {
             state = Self::merge_state(state, leveldb_state);
         }
 
-        // 2. Try disk cache first (instant, no network)
-        let disk_cache = api_cache_reader::read_api_cache(&self.app_support_path).ok();
-
-        if let Some(ref cache) = disk_cache {
-            if !cache.is_empty() {
-                debug!("Disk cache: {} tracks available", cache.len());
-            }
+        // 2. Prepare combined cache (Memory + Disk)
+        // Combine persisted memory cache with latest disk cache
+        let mut combined_cache = self.memory_cache.clone();
+        
+        // Try reading disk cache
+        if let Ok(disk_cache) = api_cache_reader::read_api_cache(&self.app_support_path) {
+            combined_cache.merge(&disk_cache);
         }
 
-        // 3. Cache reader with disk cache for enrichment
+        if !combined_cache.is_empty() {
+             debug!("Combined cache: {} tracks available (Memory: {}, Total unique: {})", 
+                combined_cache.len(), self.memory_cache.len(), combined_cache.len());
+        }
+
+        // 3. Cache reader with combined cache for enrichment
         if let Ok(cache_state) = cache_reader::read_state(
             &self.app_support_path,
-            disk_cache.as_ref(),
+            Some(&combined_cache),
         ) {
-            // If we got full metadata from disk cache, we're done
+            // If we got full metadata from cache, we're done
             if cache_state.track_name.is_some() && cache_state.neural_effect.is_some()
                 && cache_state.neural_effect.as_deref() != Some("Neural Effect Level")
             {
-                debug!("Disk cache hit — skipping API call");
+                debug!("Cache hit — skipping API call");
                 state = Self::merge_state(state, cache_state);
                 return Ok(state);
             }
 
-            // Track not in disk cache (or incomplete metadata) → try API
+            // Track not in cache (or incomplete metadata) → try API
             if cache_state.is_playing {
-                debug!("Track not in disk cache — trying Direct API");
+                debug!("Track not in cache — trying Direct API");
                 if let Ok(Some(api_data)) = api_client::fetch_recent_tracks(&self.app_support_path) {
                     if !api_data.is_empty() {
                         debug!("Direct API: {} tracks loaded", api_data.len());
-                        // Re-run cache reader with API data for enrichment
+                        
+                        // Update memory cache with new data
+                        self.memory_cache.merge(&api_data);
+                        
+                        // Update combined cache for immediate use
+                        combined_cache.merge(&api_data);
+                        
+                        // Re-run cache reader with enriched data
                         if let Ok(enriched_state) = cache_reader::read_state(
                             &self.app_support_path,
-                            Some(&api_data),
+                            Some(&combined_cache),
                         ) {
                             state = Self::merge_state(state, enriched_state);
                             return Ok(state);
