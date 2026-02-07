@@ -128,7 +128,8 @@ impl BrainFmReader {
             return Ok(state);
         }
         
-        state.is_playing = true;
+        // Don't hardcode is_playing here — let the scrapers determine it.
+        // The cache reader uses lsof to detect play/pause state.
         
         // Read sources in order of reliability:
         // - LevelDB: Baseline data (may be stale for mode)
@@ -140,6 +141,7 @@ impl BrainFmReader {
         }
         
         // 2. Cache (HIGHEST PRIORITY - has current track and mode from URL)
+        // Also provides authoritative play/pause state via lsof
         if let Ok(cache_state) = self.read_from_cache() {
             state = self.merge_state(state, cache_state);
         }
@@ -157,11 +159,14 @@ impl BrainFmReader {
         cache_reader::read_state(&self.app_support_path)
     }
     
-    /// Merge two states, preferring non-None values from the second state
+    /// Merge two states, preferring non-None values from the overlay state.
+    /// For is_playing: overlay wins (cache reader is authoritative for play/pause).
     fn merge_state(&self, base: BrainFmState, overlay: BrainFmState) -> BrainFmState {
         BrainFmState {
             mode: overlay.mode.or(base.mode),
-            is_playing: overlay.is_playing || base.is_playing,
+            // Overlay (higher priority) determines play/pause state.
+            // Cache reader sets is_playing based on lsof (true = playing, false = paused).
+            is_playing: overlay.is_playing,
             track_name: overlay.track_name.or(base.track_name),
             neural_effect: overlay.neural_effect.or(base.neural_effect),
             genre: overlay.genre.or(base.genre),

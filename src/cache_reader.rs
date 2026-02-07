@@ -31,18 +31,42 @@ pub fn read_state(app_support_path: &Path) -> Result<BrainFmState> {
     
     let mut state = BrainFmState::new();
     
-    // First, try to find the currently playing track via lsof (most reliable)
-    if let Some(url) = find_audio_url_via_lsof(&cache_path)? {
-        state = parse_audio_url(&url, state);
-        return Ok(state);
-    }
-    
-    // Fallback: scan cache files by access time
-    if let Some(url) = find_audio_url_by_atime(&cache_path)? {
-        state = parse_audio_url(&url, state);
+    // Use lsof as the authoritative play/pause signal.
+    // When Brain.fm is playing, it holds Cache_Data file handles open.
+    // When paused, it releases ALL Cache_Data handles (count drops to 0).
+    match find_audio_url_via_lsof(&cache_path)? {
+        Some(url) => {
+            // lsof found open Cache_Data files with an audio URL = actively playing
+            state = parse_audio_url(&url, state);
+            return Ok(state);
+        }
+        None => {
+            // Check if Brain.fm has ANY Cache_Data files open (even without a parseable URL)
+            if has_open_cache_files()? {
+                // Process has cache files open but we couldn't extract a URL.
+                // Fallback: scan cache files by access time.
+                if let Some(url) = find_audio_url_by_atime(&cache_path)? {
+                    state = parse_audio_url(&url, state);
+                }
+            }
+            // else: no Cache_Data files open at all = paused (is_playing stays false)
+        }
     }
     
     Ok(state)
+}
+
+/// Check if Brain.fm has ANY Cache_Data files open (play/pause signal).
+/// Returns true if at least one Cache_Data file handle is open.
+/// When Brain.fm is paused, it releases ALL Cache_Data handles.
+fn has_open_cache_files() -> Result<bool> {
+    let output = Command::new("lsof")
+        .args(["-c", "Brain.fm"])
+        .output()?;
+    
+    let stdout = String::from_utf8_lossy(&output.stdout);
+    
+    Ok(stdout.lines().any(|line| line.contains("Cache_Data")))
 }
 
 /// Find audio URL by checking which cache file Brain.fm currently has open
