@@ -21,8 +21,9 @@
 - 🎯 **Zero configuration** — Works out of the box
 - 🖥️ **Menu bar integration** — Runs quietly, no windows needed
 - 🎵 **Dynamic presence** — Shows mode, track, neural effect & duration
+- 🖼️ **Album art** — Full track artwork support
 - 🔄 **Auto-reconnect** — Handles Discord restarts gracefully
-- 🎨 **Live artwork** — Displays album art directly from Brain.fm
+- ⚡ **Smart sync** — Uses direct API for 100% accuracy, falls back to offline cache
 
 ---
 
@@ -100,14 +101,7 @@ create-dmg \
 
 ---
 
-## ⚡ Known Issues
 
-### Neural Effect Display
-
-Some tracks (especially in **Meditate** mode) display only a generic "Neural Effect Level" instead of the specific effect name. This happens because we parse the neural effect from the track filename using regex, and some tracks don't include this information in their names.
-
-> **Most tracks display correctly** — this only affects a subset of the library.  
-> We're aware of this limitation and will implement a better solution if we find an alternative data source.
 
 ---
 
