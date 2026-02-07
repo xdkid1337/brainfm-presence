@@ -1,16 +1,17 @@
 <div align="center">
 
-# 🧠 Brain.fm Discord Presence
+# 🧠 Brain.fm Presence
 
-**Share your focus sessions on Discord**
+**Show your Brain.fm focus sessions on Discord**
 
-[![macOS](https://img.shields.io/badge/platform-macOS-000000?style=flat-square&logo=apple&logoColor=white)](https://github.com/yourusername/brainfm-presence)
-[![Rust](https://img.shields.io/badge/rust-1.70+-orange?style=flat-square&logo=rust&logoColor=white)](https://rustup.rs)
-[![License: MIT](https://img.shields.io/badge/license-MIT-blue?style=flat-square)](LICENSE)
+<a href="https://github.com/xdkid1337/brainfm-presence/releases"><img src="https://cdn.simpleicons.org/apple/999999" alt="macOS" height="28"></a>
+[![Rust](https://img.shields.io/badge/Rust_1.80+-f74c00?style=for-the-badge&logo=rust&logoColor=white)](https://rustup.rs)
+[![License: MIT](https://img.shields.io/badge/MIT-3da639?style=for-the-badge)](LICENSE)
+[![v1.2.0](https://img.shields.io/badge/v1.2.0-8b5cf6?style=for-the-badge)](https://github.com/xdkid1337/brainfm-presence/releases/tag/v1.2.0)
 
-<img src="https://cdn.brain.fm/images/focus/focus_mental_state_bg_small_aura.webp" alt="Brain.fm Presence" width="400">
+<br>
 
-*A lightweight menu bar app that displays your Brain.fm session as Discord Rich Presence*
+*A lightweight macOS menu bar app that displays your Brain.fm session as Discord Rich Presence — zero configuration, just install and focus.*
 
 </div>
 
@@ -18,78 +19,49 @@
 
 ## ✨ Features
 
-- 🎯 **Zero configuration** — Works out of the box
-- 🖥️ **Menu bar integration** — Runs quietly, no windows needed
-- 🎵 **Dynamic presence** — Shows mode, track, neural effect & duration
-- 🖼️ **Album art** — Full track artwork support
-- 🔄 **Auto-reconnect** — Handles Discord restarts gracefully
-- ⚡ **Smart sync** — Uses direct API for 100% accuracy, falls back to offline cache
+| | |
+|---|---|
+| 🎯 **Zero Config** | Works out of the box — no tokens, no setup |
+| 🖥️ **Menu Bar** | Runs silently in the macOS menu bar |
+| 🎵 **Rich Presence** | Mode, track name, genre, neural effect & elapsed time |
+| 🖼️ **Album Art** | Full CDN artwork for every track |
+| ⚡ **Smart Sync** | Direct API + offline cache fallback for 100% accuracy |
+| 🔄 **Auto-Reconnect** | Handles Discord restarts with exponential backoff |
+| 🧠 **LRU Cache** | Bounded in-memory cache — safe for long sessions |
 
 ---
 
-## 🚀 Quick Start
+## 🚀 Install
+
+### Download (Recommended)
+
+1. Grab **Brain.fm Presence.dmg** from [**Releases**](https://github.com/xdkid1337/brainfm-presence/releases)
+2. Open the image → drag to **Applications**
+3. Right-click → **Open** on first launch (macOS Gatekeeper)
+
+> 💡 The app appears in your menu bar. That's it.
 
 ### Requirements
-- [Brain.fm Desktop App](https://brain.fm) (run at least once)
+
+- macOS 12+
+- [Brain.fm Desktop App](https://brain.fm) (launched at least once)
 - [Discord](https://discord.com) running
 
-### Install
-
-#### Option 1: Download (Recommended)
-
-1. Download the latest `.dmg` from [**Releases**](../../releases)
-2. Open the image and drag the app to `Applications`
-3. Launch the app (right-click → Open on first run)
-
-> 💡 **That's it!** The app will appear in your menu bar.
-
 <details>
-<summary><strong>Option 2: Build from Source</strong></summary>
+<summary><strong>Build from Source</strong></summary>
 
 ```bash
-# Clone
-git clone https://github.com/yourusername/brainfm-discord.git
-cd brainfm-discord
+git clone https://github.com/xdkid1337/brainfm-presence.git
+cd brainfm-presence
 
-# Build & Run
-cargo run --release
-```
+# Run directly
+cargo run --release --bin brainfm-presence
 
-Requires [Rust 1.70+](https://rustup.rs)
-
-</details>
-
----
-
-## ⚠️ Platform Support
-
-| Platform | Status | Notes |
-|----------|--------|-------|
-| **macOS** | ✅ Supported | Fully tested and working |
-| **Windows** | 🚧 Not Yet | Contributions welcome! |
-| **Linux** | ❌ Not Planned | Brain.fm desktop not available |
-
-### 🤝 Help Wanted: Windows Support
-
-We'd love to support Windows, but we need help testing and implementing it!  
-**If you're a Windows user and Rust developer**, please check out the [contribution guidelines](#contributing).
-
----
-
-## 🛠️ Development
-
-```bash
-# Dev build
-cargo build
-
-# Release build
-cargo build --release
-
-# Create macOS .app bundle
+# Or create .app bundle + .dmg
 cargo install cargo-bundle
-cargo bundle --release
+cargo bundle --release --bin brainfm-presence
 
-# Create .dmg installer (requires: brew install create-dmg)
+brew install create-dmg
 create-dmg \
   --volname "Brain.fm Presence" \
   --window-size 600 400 \
@@ -99,9 +71,9 @@ create-dmg \
   "target/release/bundle/osx/Brain.fm Presence.app"
 ```
 
----
+Requires [Rust 1.80+](https://rustup.rs)
 
-
+</details>
 
 ---
 
@@ -112,35 +84,29 @@ create-dmg \
 
 - Ensure Discord is running
 - Check **Settings → Activity Privacy → Activity Status** is enabled
-- App retries connection every 60s
+- The app retries the connection automatically with backoff
+
 </details>
 
 <details>
 <summary><strong>Brain.fm state not detected?</strong></summary>
 
-- Run Brain.fm desktop app at least once
-- Make sure music is playing
-- Updates may take ~15 seconds
+- Launch the Brain.fm desktop app at least once
+- Start playing music — detection takes ~15 seconds on first sync
+
 </details>
 
 ---
 
 ## 🤝 Contributing
 
-Contributions are welcome! Whether it's:
-
-- 🐛 Bug reports
-- 💡 Feature requests  
-- 🪟 **Windows support** (especially needed!)
-- 📖 Documentation improvements
-
-Please open an issue or submit a pull request.
+Contributions welcome — bug reports, feature ideas, or pull requests.
 
 ---
 
 ## 📄 License
 
-[MIT License](LICENSE) — Use freely, attribution appreciated.
+[MIT](LICENSE)
 
 ---
 
