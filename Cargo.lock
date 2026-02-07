@@ -238,7 +238,7 @@ dependencies = [
 
 [[package]]
 name = "brainfm-presence"
-version = "1.0.0"
+version = "1.1.0"
 dependencies = [
  "anyhow",
  "base64",
@@ -251,6 +251,7 @@ dependencies = [
  "flate2",
  "image",
  "log",
+ "mediaremote-rs",
  "objc",
  "regex",
  "rusty-leveldb",
@@ -1350,6 +1351,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "mediaremote-rs"
+version = "0.1.4"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e575b8ec108093ff463f7508b41f905f15d894d247c92b23406ef13e00e860a1"
+dependencies = [
+ "block2 0.6.2",
+ "libc",
+ "objc2 0.6.3",
+ "objc2-foundation 0.3.2",
+ "serde",
+ "serde_json",
+]
+
+[[package]]
 name = "memchr"
 version = "2.7.6"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1645,6 +1660,7 @@ checksum = "e3e0adef53c21f888deb4fa59fc59f7eb17404926ee8a6f59f5df0fd7f9f3272"
 dependencies = [
  "bitflags 2.10.0",
  "block2 0.6.2",
+ "libc",
  "objc2 0.6.3",
  "objc2-core-foundation",
 ]

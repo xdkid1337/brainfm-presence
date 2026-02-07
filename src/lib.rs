@@ -18,6 +18,7 @@ pub mod api_cache_reader;
 pub mod api_client;
 pub mod cache_reader;
 pub mod leveldb_reader;
+pub mod media_remote_reader;
 pub mod platform;
 pub mod tray;
 
@@ -164,6 +165,7 @@ impl BrainFmReader {
     /// 1. LevelDB — baseline data (mode, ADHD mode), may be stale
     /// 2. Memory Cache + Disk cache → Direct API — structured metadata lookup table
     /// 3. Cache Reader — real-time audio URL detection via `lsof` + metadata enrichment
+    /// 4. MediaRemote — macOS Now Playing fallback when `lsof` detection fails
     pub fn read_state(&mut self) -> Result<BrainFmState> {
         let mut state = BrainFmState::new();
 
@@ -232,6 +234,33 @@ impl BrainFmReader {
 
             // Fallback: use whatever we got from the first pass
             state = Self::merge_state(state, cache_state);
+        }
+
+        // 4. MediaRemote fallback — if lsof didn't detect playback, ask macOS
+        if !state.is_playing {
+            if let Some(mr_state) = media_remote_reader::read_state() {
+                if mr_state.is_playing {
+                    debug!("MediaRemote: Brain.fm is playing (lsof missed it)");
+                    state.is_playing = true;
+
+                    // Try to enrich with cached metadata using the track name
+                    if let Some(ref title) = mr_state.track_name {
+                        if let Some(metadata) = combined_cache.lookup_by_name(title) {
+                            debug!("MediaRemote: cache hit for '{}'", title);
+                            state.track_name = Some(metadata.name.clone());
+                            state.genre = metadata.genre.clone().or(state.genre);
+                            state.neural_effect = metadata.neural_effect.clone().or(state.neural_effect);
+                            state.mental_state_or_mode(metadata);
+                            state.activity = metadata.activity.clone().or(state.activity);
+                            state.image_url = metadata.image_url.clone().or(state.image_url);
+                        } else {
+                            // No cache match — use the raw title from MediaRemote
+                            debug!("MediaRemote: no cache match for '{}', using raw title", title);
+                            state.track_name = Some(title.clone());
+                        }
+                    }
+                }
+            }
         }
 
         Ok(state)

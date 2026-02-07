@@ -11,7 +11,7 @@ fn main() -> Result<()> {
     println!("==================================\n");
     
     // Create reader
-    let reader = match BrainFmReader::new() {
+    let mut reader = match BrainFmReader::new() {
         Ok(r) => r,
         Err(e) => {
             eprintln!("❌ Error: {}", e);
@@ -102,6 +102,23 @@ fn main() -> Result<()> {
             }
         }
         Err(e) => println!("   ❌ Error: {}", e),
+    }
+
+    // MediaRemote reader (macOS Now Playing)
+    println!("\n🎵 MediaRemote Reader (macOS Now Playing):");
+    match brainfm_presence::media_remote_reader::read_state() {
+        Some(mr) => {
+            println!("   ✅ Brain.fm detected via MediaRemote");
+            println!("   Playing: {} | Track: {} | Elapsed: {:.0}s / {:.0}s",
+                if mr.is_playing { "Yes" } else { "No" },
+                mr.track_name.as_deref().unwrap_or("(none)"),
+                mr.elapsed_secs.unwrap_or(0.0),
+                mr.duration_secs.unwrap_or(0.0),
+            );
+        }
+        None => {
+            println!("   (Brain.fm not detected as Now Playing app)");
+        }
     }
     
     Ok(())

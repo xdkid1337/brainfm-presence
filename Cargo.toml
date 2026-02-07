@@ -1,6 +1,6 @@
 [package]
 name = "brainfm-presence"
-version = "1.0.0"
+version = "1.1.0"
 edition = "2021"
 authors = ["Jakub Sládek (xd.js)"]
 description = "Discord Rich Presence for Brain.fm - displays your current focus mode and track"
@@ -60,6 +60,7 @@ env_logger = "0.11"
 core-foundation = "0.10"
 cocoa = "0.26"
 objc = "0.2"
+mediaremote-rs = "0.1"
 
 # Windows dependencies (Windows only)
 [target.'cfg(target_os = "windows")'.dependencies]
@@ -74,6 +75,11 @@ path = "src/bin/discord_rpc.rs"
 [[bin]]
 name = "brainfm-debug"
 path = "src/main.rs"
+
+# MediaRemote test binary (not bundled)
+[[bin]]
+name = "brainfm-mediaremote-test"
+path = "src/bin/test_mediaremote.rs"
 
 # Cargo bundle configuration for macOS .app
 [package.metadata.bundle]

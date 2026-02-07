@@ -103,6 +103,15 @@ impl ApiCacheData {
         None
     }
 
+    /// Look up metadata by track name (case-insensitive).
+    ///
+    /// Used by the MediaRemote reader to match the Now Playing title
+    /// (e.g., "Nocturne") against cached API metadata for rich details.
+    pub fn lookup_by_name(&self, name: &str) -> Option<&TrackMetadata> {
+        let lower = name.to_lowercase();
+        self.tracks.values().find(|meta| meta.name.to_lowercase() == lower)
+    }
+
     /// Number of tracks in the cache
     pub fn len(&self) -> usize {
         self.tracks.len()
