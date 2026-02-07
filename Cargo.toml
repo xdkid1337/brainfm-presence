@@ -1,6 +1,6 @@
 [package]
 name = "brainfm-presence"
-version = "1.2.0"
+version = "1.2.5"
 edition = "2021"
 rust-version = "1.80"
 authors = ["Jakub Sládek (xd.js)"]
@@ -52,8 +52,8 @@ env_logger = "0.11"
 # macOS frameworks bindings (macOS only)
 [target.'cfg(target_os = "macos")'.dependencies]
 core-foundation = "0.10"
-cocoa = "0.26"
-objc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSApplication", "NSRunningApplication"] }
 mediaremote-rs = "0.1"
 
 # Windows dependencies (Windows only)
@@ -88,6 +88,8 @@ Runs quietly in your menu bar with no window required.
 """
 category = "Music"
 osx_minimum_system_version = "10.14"
+# Hide from Dock — tray-only agent app
+plist_entries = { "LSUIElement" = true }
 
 # Configuration for the main binary
 [package.metadata.bundle.bin.brainfm-presence]

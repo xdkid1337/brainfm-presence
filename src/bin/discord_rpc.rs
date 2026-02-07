@@ -85,6 +85,18 @@ fn main() -> Result<()> {
         .format_timestamp(None)
         .init();
 
+    // Hide from Dock and Cmd+Tab — tray-only mode
+    #[cfg(target_os = "macos")]
+    {
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
+        use objc2::MainThreadMarker;
+
+        // Safe: main() always runs on the main thread
+        let mtm = unsafe { MainThreadMarker::new_unchecked() };
+        let app = NSApplication::sharedApplication(mtm);
+        app.setActivationPolicy(NSApplicationActivationPolicy::Accessory);
+    }
+
     info!("🧠 Brain.fm Discord Rich Presence starting...");
 
     // Create event loop with custom user events
