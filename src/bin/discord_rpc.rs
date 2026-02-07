@@ -7,6 +7,7 @@
 //! - Main thread: runs winit event loop for proper macOS menu handling
 //! - Background thread: reads Brain.fm state and updates Discord
 
+use anyhow::{Context, Result};
 use brainfm_presence::{BrainFmReader, BrainFmState};
 use discord_rich_presence::{activity, DiscordIpc, DiscordIpcClient};
 use log::{debug, error, info, warn};
@@ -27,6 +28,10 @@ const DISCORD_APP_ID: &str = "1468727702675521547";
 
 /// Update interval in seconds
 const UPDATE_INTERVAL_SECS: u64 = 5;
+
+/// Exponential backoff parameters for Discord reconnection
+const BACKOFF_BASE_SECS: u64 = 5;
+const BACKOFF_MAX_SECS: u64 = 300;
 
 /// Menu item IDs
 const MENU_ID_STATUS: &str = "status";
@@ -74,7 +79,7 @@ impl ApplicationHandler<UserEvent> for App {
     }
 }
 
-fn main() {
+fn main() -> Result<()> {
     // Initialize logging
     env_logger::Builder::from_env(env_logger::Env::default().default_filter_or("info"))
         .format_timestamp(None)
@@ -85,7 +90,7 @@ fn main() {
     // Create event loop with custom user events
     let event_loop = EventLoop::<UserEvent>::with_user_event()
         .build()
-        .expect("Failed to create event loop");
+        .context("Failed to create event loop")?;
 
     // Set control flow to wait (efficient, no busy loop)
     event_loop.set_control_flow(ControlFlow::Wait);
@@ -100,7 +105,7 @@ fn main() {
     }));
 
     // Create tray icon and menu
-    let (tray_icon, status_item) = create_tray_icon();
+    let (tray_icon, status_item) = create_tray_icon()?;
 
     info!("✅ System tray initialized");
 
@@ -121,13 +126,14 @@ fn main() {
 
     // Run the event loop (this blocks and handles all events properly)
     info!("🔄 Running event loop...");
-    let _ = event_loop.run_app(&mut app);
+    event_loop.run_app(&mut app).context("Event loop error")?;
+    Ok(())
 }
 
 /// Create the tray icon and menu
-fn create_tray_icon() -> (tray_icon::TrayIcon, MenuItem) {
+fn create_tray_icon() -> Result<(tray_icon::TrayIcon, MenuItem)> {
     // Load icon
-    let icon = load_icon();
+    let icon = load_icon()?;
 
     // Create menu items
     let status_item = MenuItem::with_id(MENU_ID_STATUS, "Brain.fm Presence", false, None);
@@ -135,9 +141,9 @@ fn create_tray_icon() -> (tray_icon::TrayIcon, MenuItem) {
 
     // Build menu
     let menu = Menu::new();
-    menu.append(&status_item).unwrap();
-    menu.append(&PredefinedMenuItem::separator()).unwrap();
-    menu.append(&quit_item).unwrap();
+    menu.append(&status_item).context("Failed to append status item")?;
+    menu.append(&PredefinedMenuItem::separator()).context("Failed to append separator")?;
+    menu.append(&quit_item).context("Failed to append quit item")?;
 
     // Create tray icon
     let tray_icon = TrayIconBuilder::new()
@@ -145,23 +151,23 @@ fn create_tray_icon() -> (tray_icon::TrayIcon, MenuItem) {
         .with_menu(Box::new(menu))
         .with_tooltip("Brain.fm Presence")
         .build()
-        .expect("Failed to create tray icon");
+        .context("Failed to create tray icon")?;
 
-    (tray_icon, status_item)
+    Ok((tray_icon, status_item))
 }
 
 /// Load the tray icon
-fn load_icon() -> Icon {
+fn load_icon() -> Result<Icon> {
     let icon_bytes = include_bytes!("../../assets/tray_icon.png");
 
     let image = image::load_from_memory(icon_bytes)
-        .expect("Failed to load tray icon image")
+        .context("Failed to load tray icon image")?
         .into_rgba8();
 
     let (width, height) = image.dimensions();
     let rgba = image.into_raw();
 
-    Icon::from_rgba(rgba, width, height).expect("Failed to create icon from RGBA data")
+    Icon::from_rgba(rgba, width, height).context("Failed to create icon from RGBA data")
 }
 
 /// Background worker that reads Brain.fm state and updates Discord
@@ -170,7 +176,7 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
     let mut reader = match BrainFmReader::new() {
         Ok(r) => r,
         Err(e) => {
-            error!("Failed to create Brain.fm reader: {}", e);
+            error!("Failed to create Brain.fm reader: {e}");
             error!("Make sure Brain.fm is installed and has been run at least once.");
             return;
         }
@@ -189,10 +195,11 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
     let mut last_state: Option<BrainFmState> = None;
     let mut track_start = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before UNIX epoch")
         .as_secs() as i64;
     let mut last_track: Option<String> = None;
-    let mut discord_retry_count = 0;
+    let mut backoff_secs: u64 = BACKOFF_BASE_SECS;
+    let mut ticks_until_retry: u64 = 0;
 
     loop {
         // Check for shutdown signal
@@ -205,14 +212,23 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
             break;
         }
 
-        // Try to reconnect to Discord if not connected
-        if client.is_none() && discord_retry_count % 4 == 0 {
-            if let Some(c) = create_discord_client() {
-                info!("Connected to Discord!");
-                client = Some(c);
+        // Try to reconnect to Discord if not connected (exponential backoff)
+        if client.is_none() {
+            if ticks_until_retry == 0 {
+                if let Some(c) = create_discord_client() {
+                    info!("Connected to Discord!");
+                    client = Some(c);
+                    backoff_secs = BACKOFF_BASE_SECS; // reset on success
+                } else {
+                    // Schedule next retry with exponential backoff
+                    ticks_until_retry = backoff_secs / UPDATE_INTERVAL_SECS;
+                    debug!("Discord retry in ~{backoff_secs}s");
+                    backoff_secs = (backoff_secs * 2).min(BACKOFF_MAX_SECS);
+                }
+            } else {
+                ticks_until_retry -= 1;
             }
         }
-        discord_retry_count += 1;
 
         // Read current Brain.fm state
         match reader.read_state() {
@@ -222,7 +238,7 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
                 if current_track != last_track {
                     track_start = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
-                        .unwrap()
+                        .expect("system clock before UNIX epoch")
                         .as_secs() as i64;
                     last_track = current_track;
                 }
@@ -240,18 +256,18 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
 
                     if should_update {
                         if let Err(e) = update_discord_presence(c, &state, track_start) {
-                            warn!("Discord update error: {}", e);
+                            warn!("Discord update error: {e}");
                             // Connection might be lost, try to reconnect
                             client = None;
                         } else {
-                            debug!("Updated presence: {}", status_text);
+                            debug!("Updated presence: {status_text}");
                         }
                         last_state = Some(state);
                     }
                 }
             }
             Err(e) => {
-                debug!("Error reading state: {}", e);
+                debug!("Error reading state: {e}");
                 let _ = proxy.send_event(UserEvent::StatusUpdate("Brain.fm not running".to_string()));
             }
         }
@@ -335,13 +351,13 @@ fn update_discord_presence(
         large_image_owned.as_str()
     } else {
         match state.mode.as_deref() {
-            Some("Sleep") | Some("Deep Sleep") | Some("Light Sleep") => {
+            Some("Sleep" | "Deep Sleep" | "Light Sleep") => {
                 "https://cdn.brain.fm/images/sleep/sleep_mental_state_bg_small_aura.webp"
             }
-            Some("Relax") | Some("Recharge") | Some("Chill") => {
+            Some("Relax" | "Recharge" | "Chill") => {
                 "https://cdn.brain.fm/images/relax/relax_mental_state_bg_small_aura.webp"
             }
-            Some("Meditate") | Some("Unguided") | Some("Guided") => {
+            Some("Meditate" | "Unguided" | "Guided") => {
                 "https://cdn.brain.fm/images/meditate/meditate_mental_state_bg_small_aura.webp"
             }
             _ => "https://cdn.brain.fm/images/focus/focus_mental_state_bg_small_aura.webp",
@@ -352,23 +368,11 @@ fn update_discord_presence(
         .clone()
         .unwrap_or_else(|| "Neural Effect Level".to_string());
 
-    // Small image = genre from Brain.fm CDN
-    let small_image = match state.genre.as_deref() {
-        Some("LoFi") | Some("Lofi") | Some("lofi") => "https://cdn.brain.fm/icons/lofi.png",
-        Some("Piano") | Some("piano") => "https://cdn.brain.fm/icons/piano.png",
-        Some("Electronic") | Some("electronic") => "https://cdn.brain.fm/icons/electronic.png",
-        Some("Grooves") | Some("grooves") => "https://cdn.brain.fm/icons/grooves.png",
-        Some("Atmospheric") | Some("atmospheric") => "https://cdn.brain.fm/icons/atmospheric.png",
-        Some("Cinematic") | Some("cinematic") => "https://cdn.brain.fm/icons/cinematic.png",
-        Some("Classical") | Some("classical") => "https://cdn.brain.fm/icons/classical.png",
-        Some("Acoustic") | Some("acoustic") => "https://cdn.brain.fm/icons/acoustic.png",
-        Some("Drone") | Some("drone") => "https://cdn.brain.fm/icons/drone.png",
-        Some("Rain") | Some("rain") => "https://cdn.brain.fm/icons/rain.png",
-        Some("Forest") | Some("forest") => "https://cdn.brain.fm/icons/forest.png",
-        Some("Beach") | Some("beach") => "https://cdn.brain.fm/icons/beach.png",
-        Some("Night") | Some("night") => "https://cdn.brain.fm/icons/night.png",
-        _ => "https://cdn.brain.fm/icons/electronic.png",
-    };
+    // Small image = genre from Brain.fm CDN (case-insensitive)
+    let small_image = state
+        .genre
+        .as_deref()
+        .map_or("https://cdn.brain.fm/icons/electronic.png", brainfm_presence::util::genre_icon_url);
     let small_text = state.genre.clone().unwrap_or_else(|| "Brain.fm".to_string());
 
     // Build activity with ActivityType::Listening for "Listening to brain.fm"

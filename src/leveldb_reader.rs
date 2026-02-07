@@ -2,11 +2,31 @@
 //! 
 //! Reads persistently stored data from the Electron app's LevelDB storage.
 
-use anyhow::{Context, Result};
+use anyhow::Result;
 use regex::Regex;
 use std::path::Path;
-use std::process::Command;
+use std::sync::LazyLock;
 use crate::BrainFmState;
+
+/// Regex for extracting display value from LevelDB content
+static DISPLAY_VALUE_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"displayValue["\s:\\]+([A-Za-z\s]+)"#).unwrap()
+});
+
+/// Regex for extracting track name from playback events
+static TRACK_NAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""name"\s*:\s*"([^"]+)""#).unwrap()
+});
+
+/// Regex for extracting audio URL from playback events
+static TRACK_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""url"\s*:\s*"([^"]+\.mp3[^"]*)""#).unwrap()
+});
+
+/// Regex for extracting .mp3 filename from a URL
+static MP3_FILENAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"/([^/?]+)\.mp3"#).unwrap()
+});
 
 /// Read Brain.fm state from LevelDB files using strings extraction
 /// 
@@ -23,19 +43,8 @@ pub fn read_state(app_support_path: &Path) -> Result<BrainFmState> {
     
     let mut state = BrainFmState::new();
     
-    // Read strings from all LevelDB files
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                "strings {:?}/*.ldb {:?}/*.log 2>/dev/null",
-                leveldb_path, leveldb_path
-            ),
-        ])
-        .output()
-        .context("Failed to run strings command")?;
-    
-    let content = String::from_utf8_lossy(&output.stdout);
+    // Read strings from all LevelDB files using native Rust I/O
+    let content = crate::util::read_leveldb_strings(&leveldb_path)?;
     
     // Parse the content for Brain.fm data
     state = parse_leveldb_content(&content, state);
@@ -66,10 +75,7 @@ fn parse_leveldb_content(content: &str, mut state: BrainFmState) -> BrainFmState
         // Try to find persist:activities data which contains the current mode
         if content.contains("persist:activities") {
             // Look for displayValue which contains the current mode
-            if let Some(captures) = Regex::new(r#"displayValue["\s:\\]+([A-Za-z\s]+)"#)
-                .ok()
-                .and_then(|re| re.captures(content))
-            {
+            if let Some(captures) = DISPLAY_VALUE_RE.captures(content) {
                 if let Some(mode) = captures.get(1) {
                     let mode_str = mode.as_str().trim();
                     // Validate it's a known mode
@@ -130,14 +136,6 @@ fn parse_leveldb_content(content: &str, mut state: BrainFmState) -> BrainFmState
 fn parse_playback_events(content: &str, mut state: BrainFmState) -> BrainFmState {
     // Find all core_playback_start_success events
     // The last one in the log is the most recent (current track)
-    let _re = Regex::new(
-        r#"\{"[^}]*"event_type"\s*:\s*"core_playback_start_success"[^}]*"event_properties"\s*:\s*\{[^}]*"name"\s*:\s*"([^"]+)"[^}]*"url"\s*:\s*"([^"]+)"[^}]*\}"#
-    );
-    
-    // Alternative simpler pattern - look for playback success with name
-    let _simple_re = Regex::new(r#""event_type"\s*:\s*"core_playback_start_success"[^{]*"name"\s*:\s*"([^"]+)"[^}]*"url"\s*:\s*"([^"]+)""#);
-    
-    // Try to find all playback events and use the last one (most recent)
     let mut last_track_name: Option<String> = None;
     let mut last_url: Option<String> = None;
     
@@ -145,13 +143,13 @@ fn parse_playback_events(content: &str, mut state: BrainFmState) -> BrainFmState
     for line in content.lines() {
         if line.contains("core_playback_start_success") || line.contains("core_playback_start_attempt") {
             // Extract name
-            if let Some(caps) = Regex::new(r#""name"\s*:\s*"([^"]+)""#).ok().and_then(|r| r.captures(line)) {
+            if let Some(caps) = TRACK_NAME_RE.captures(line) {
                 if let Some(name) = caps.get(1) {
                     last_track_name = Some(name.as_str().to_string());
                 }
             }
             // Extract URL
-            if let Some(caps) = Regex::new(r#""url"\s*:\s*"([^"]+\.mp3[^"]*)""#).ok().and_then(|r| r.captures(line)) {
+            if let Some(caps) = TRACK_URL_RE.captures(line) {
                 if let Some(url) = caps.get(1) {
                     last_url = Some(url.as_str().to_string());
                 }
@@ -176,7 +174,7 @@ fn parse_playback_events(content: &str, mut state: BrainFmState) -> BrainFmState
 /// Parse audio URL to extract metadata
 fn parse_audio_url_for_metadata(url: &str, mut state: BrainFmState) -> BrainFmState {
     // Extract filename from URL
-    if let Some(caps) = Regex::new(r#"/([^/?]+)\.mp3"#).ok().and_then(|r| r.captures(url)) {
+    if let Some(caps) = MP3_FILENAME_RE.captures(url) {
         if let Some(filename) = caps.get(1) {
             let parts: Vec<&str> = filename.as_str().split('_').collect();
             

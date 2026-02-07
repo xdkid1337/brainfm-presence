@@ -12,10 +12,33 @@ use base64::prelude::*;
 use log::debug;
 use regex::Regex;
 use std::path::Path;
-use std::process::Command;
-use std::time::{SystemTime, UNIX_EPOCH};
+use std::sync::LazyLock;
+use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
 use crate::api_cache_reader::{ApiCacheData, parse_servings_json};
+
+/// Regex for matching JWT tokens
+static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+").unwrap()
+});
+
+/// Regex for extracting user ID from persist:auth
+static USER_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""userId":\s*"\\?"([A-Za-z0-9_\-]+)\\?""#).unwrap()
+});
+
+/// Regex for extracting exp claim from JWT payload
+static EXP_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#""exp"\s*:\s*([0-9]+(?:\.[0-9]+)?)"#).unwrap()
+});
+
+/// Shared HTTP agent with connection pooling and timeouts
+static HTTP_AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
+    ureq::Agent::config_builder()
+        .timeout_global(Some(Duration::from_secs(10)))
+        .build()
+        .new_agent()
+});
 
 /// Auth credentials extracted from LevelDB
 struct AuthInfo {
@@ -55,7 +78,7 @@ pub fn fetch_recent_tracks(app_support_path: &Path) -> Result<Option<ApiCacheDat
 
     debug!("Fetching recent tracks from API: {}", url);
 
-    let mut response = ureq::get(&url)
+    let mut response = HTTP_AGENT.get(&url)
         .header("Authorization", &format!("Bearer {}", auth.token))
         .header("Accept", "application/json")
         .call()
@@ -83,28 +106,11 @@ fn extract_auth(app_support_path: &Path) -> Result<Option<AuthInfo>> {
     }
 
     // Read strings from LevelDB files (same approach as leveldb_reader)
-    let output = Command::new("sh")
-        .args([
-            "-c",
-            &format!(
-                "strings {:?}/*.ldb {:?}/*.log 2>/dev/null",
-                leveldb_path, leveldb_path
-            ),
-        ])
-        .output()
-        .context("Failed to run strings command")?;
-
-    let content = String::from_utf8_lossy(&output.stdout);
-
-    // Find JWT tokens — there may be multiple (old expired ones linger in .ldb files).
-    // We want the freshest valid one.
-    let jwt_re = Regex::new(r"eyJ[A-Za-z0-9_\-]+\.eyJ[A-Za-z0-9_\-]+\.[A-Za-z0-9_\-]+").unwrap();
-
-    // Find user ID from the persist:auth JSON (pattern: "userId":"\"xxx\"")
-    let uid_re = Regex::new(r#""userId":\s*"\\?"([A-Za-z0-9_\-]+)\\?""#).unwrap();
+    let leveldb_content = crate::util::read_leveldb_strings(&leveldb_path)?;
+    let content = leveldb_content;
 
     // Collect all JWT tokens, prefer the last non-expired one (most recent in file order)
-    let all_tokens: Vec<&str> = jwt_re.find_iter(&content).map(|m| m.as_str()).collect();
+    let all_tokens: Vec<&str> = JWT_RE.find_iter(&content).map(|m| m.as_str()).collect();
     let token = all_tokens
         .iter()
         .rev() // Check newest first (last in file = most recent write)
@@ -112,7 +118,7 @@ fn extract_auth(app_support_path: &Path) -> Result<Option<AuthInfo>> {
         .or_else(|| all_tokens.last()) // If all expired, use the most recent anyway
         .map(|t| t.to_string());
 
-    let user_id = uid_re
+    let user_id = USER_ID_RE
         .captures(&content)
         .and_then(|c| c.get(1))
         .map(|m| m.as_str().to_string());
@@ -148,8 +154,7 @@ fn is_token_expired(token: &str) -> bool {
 
     // Extract "exp" field — we do a simple regex to avoid pulling in serde_json
     // just for this one check (the payload is always {"...","exp":1234567890.4,...})
-    let exp_re = Regex::new(r#""exp"\s*:\s*([0-9]+(?:\.[0-9]+)?)"#).unwrap();
-    let exp = match exp_re.captures(payload_str) {
+    let exp = match EXP_RE.captures(payload_str) {
         Some(c) => match c[1].parse::<f64>() {
             Ok(v) => v,
             Err(_) => return true,
@@ -159,7 +164,7 @@ fn is_token_expired(token: &str) -> bool {
 
     let now = SystemTime::now()
         .duration_since(UNIX_EPOCH)
-        .unwrap()
+        .expect("system clock before UNIX epoch")
         .as_secs_f64();
 
     now > exp

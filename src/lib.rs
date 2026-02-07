@@ -1,3 +1,5 @@
+#![deny(unsafe_code)]
+
 //! Brain.fm information reader
 //!
 //! This module provides functionality to read the current state of Brain.fm app
@@ -21,6 +23,7 @@ pub mod leveldb_reader;
 pub mod media_remote_reader;
 pub mod platform;
 pub mod tray;
+pub mod util;
 
 /// Represents the current state of Brain.fm playback
 #[derive(Debug, Clone, Serialize, Deserialize, Default)]
@@ -61,11 +64,13 @@ pub struct BrainFmState {
 
 impl BrainFmState {
     /// Create a new empty state
+    #[must_use]
     pub fn new() -> Self {
         Self::default()
     }
 
     /// Check if Brain.fm is actively playing
+    #[must_use]
     pub fn is_active(&self) -> bool {
         self.is_playing && self.mode.is_some()
     }
@@ -196,7 +201,7 @@ impl BrainFmReader {
         // 3. Cache reader with combined cache for enrichment
         if let Ok(cache_state) = cache_reader::read_state(
             &self.app_support_path,
-            Some(&combined_cache),
+            Some(&mut combined_cache),
         ) {
             // If we got full metadata from cache, we're done
             if cache_state.track_name.is_some() && cache_state.neural_effect.is_some()
@@ -223,7 +228,7 @@ impl BrainFmReader {
                         // Re-run cache reader with enriched data
                         if let Ok(enriched_state) = cache_reader::read_state(
                             &self.app_support_path,
-                            Some(&combined_cache),
+                            Some(&mut combined_cache),
                         ) {
                             state = Self::merge_state(state, enriched_state);
                             return Ok(state);
@@ -291,8 +296,49 @@ impl BrainFmReader {
     }
 }
 
-impl Default for BrainFmReader {
-    fn default() -> Self {
-        Self::new().expect("Failed to create BrainFmReader")
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn test_merge_state_option_overlay_wins() {
+        let base = BrainFmState {
+            mode: Some("Focus".into()),
+            track_name: Some("Base Track".into()),
+            ..Default::default()
+        };
+        let overlay = BrainFmState {
+            mode: Some("Sleep".into()),
+            ..Default::default()
+        };
+        let merged = BrainFmReader::merge_state(base, overlay);
+        assert_eq!(merged.mode, Some("Sleep".into()));
+        assert_eq!(merged.track_name, Some("Base Track".into()));
+    }
+
+    #[test]
+    fn test_merge_state_is_playing_from_overlay() {
+        let base = BrainFmState { is_playing: true, ..Default::default() };
+        let overlay = BrainFmState { is_playing: false, ..Default::default() };
+        let merged = BrainFmReader::merge_state(base, overlay);
+        assert!(!merged.is_playing); // overlay wins even if false
+    }
+
+    #[test]
+    fn test_merge_state_bool_or() {
+        let base = BrainFmState { adhd_mode: true, ..Default::default() };
+        let overlay = BrainFmState { infinite_play: true, ..Default::default() };
+        let merged = BrainFmReader::merge_state(base, overlay);
+        assert!(merged.adhd_mode);     // base true || overlay false
+        assert!(merged.infinite_play); // base false || overlay true
+    }
+
+    #[test]
+    fn test_merge_state_both_none() {
+        let base = BrainFmState::new();
+        let overlay = BrainFmState::new();
+        let merged = BrainFmReader::merge_state(base, overlay);
+        assert!(merged.mode.is_none());
+        assert!(merged.track_name.is_none());
     }
 }

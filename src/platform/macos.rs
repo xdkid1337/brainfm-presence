@@ -6,6 +6,7 @@ use super::Platform;
 use anyhow::{Context, Result};
 use std::path::PathBuf;
 use std::process::Command;
+use crate::util;
 
 /// macOS platform implementation
 pub struct MacOSPlatform;
@@ -30,11 +31,12 @@ impl Platform for MacOSPlatform {
     }
     
     fn is_brainfm_running() -> bool {
-        let output = Command::new("pgrep")
-            .args(["-x", "Brain.fm"])
-            .output();
-        
-        matches!(output, Ok(o) if o.status.success())
+        util::run_command_with_timeout(
+            Command::new("pgrep").args(["-x", "Brain.fm"]),
+            util::DEFAULT_COMMAND_TIMEOUT,
+        )
+        .map(|output| output.status.success())
+        .unwrap_or(false)
     }
     
     fn name() -> &'static str {

@@ -18,10 +18,17 @@ use flate2::read::GzDecoder;
 use log::{debug, trace};
 use regex::Regex;
 use serde::Deserialize;
-use std::collections::HashMap;
+use crate::util::url_decode;
+
 use std::fs;
 use std::io::Read;
 use std::path::Path;
+use std::sync::LazyLock;
+
+/// Regex for matching Brain.fm servings API URLs in cache headers
+static SERVINGS_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"api\.brain\.fm/v3/users/[^/]+/servings/(recent|favorites)").unwrap()
+});
 
 /// Rich metadata extracted from Brain.fm API responses
 #[derive(Debug, Clone)]
@@ -57,83 +64,102 @@ pub struct TrackMetadata {
     pub instruments: Vec<String>,
 }
 
-/// Container for all API cache data, keyed by audio filename
-#[derive(Debug)]
+/// Maximum number of entries in the API cache
+const MAX_CACHE_ENTRIES: usize = 500;
+
+/// Container for all API cache data, keyed by audio filename.
+///
+/// Uses a `Vec`-based bounded LRU cache. Lookups move the accessed entry to
+/// the front; inserts evict the least-recently-used (last) entry when full.
+#[derive(Debug, Clone, Default)]
 pub struct ApiCacheData {
-    /// Maps audio filename (e.g., "Blooming_Sleep_DeepSleep_Atmospheric_60_120bpm_Nrmlzd2_VBR5.mp3")
-    /// to rich track metadata
-    tracks: HashMap<String, TrackMetadata>,
+    /// Ordered list of (filename, metadata) pairs — most recently used first.
+    tracks: Vec<(String, TrackMetadata)>,
 }
 
 impl ApiCacheData {
     /// Create a new empty cache
+    #[must_use]
     pub fn new() -> Self {
         Self {
-            tracks: HashMap::new(),
+            tracks: Vec::new(),
         }
     }
 
+    /// Insert a key-value pair, enforcing the capacity bound.
+    fn insert(&mut self, key: String, value: TrackMetadata) {
+        // Remove existing entry if present
+        self.tracks.retain(|(k, _)| k != &key);
+        // Insert at front (most recently used)
+        self.tracks.insert(0, (key, value));
+        // Evict oldest if over capacity
+        self.tracks.truncate(MAX_CACHE_ENTRIES);
+    }
+
     /// Look up metadata by matching the audio URL's filename against cached data.
-    ///
-    /// The match is done against the filename portion of the URL (after the last `/`),
-    /// stripping query parameters. This handles both URL-encoded and decoded filenames.
-    pub fn lookup_by_url(&self, audio_url: &str) -> Option<&TrackMetadata> {
+    pub fn lookup_by_url(&mut self, audio_url: &str) -> Option<&TrackMetadata> {
         let filename = extract_filename_from_url(audio_url)?;
         let decoded = url_decode(&filename);
 
         // Try exact match first (most common case)
-        if let Some(meta) = self.tracks.get(&decoded) {
-            return Some(meta);
+        if let Some(idx) = self.tracks.iter().position(|(k, _)| *k == decoded) {
+            self.promote(idx);
+            return Some(&self.tracks[0].1);
         }
 
         // Try URL-encoded match
-        if let Some(meta) = self.tracks.get(&filename) {
-            return Some(meta);
+        if let Some(idx) = self.tracks.iter().position(|(k, _)| *k == filename) {
+            self.promote(idx);
+            return Some(&self.tracks[0].1);
         }
 
-        // Substring match: check if any cached filename is contained in the URL
-        // This handles edge cases where CDN prefixes differ
-        for (cached_filename, meta) in &self.tracks {
-            let decoded_cached = url_decode(cached_filename);
-            if decoded.contains(&decoded_cached) || decoded_cached.contains(&decoded) {
-                return Some(meta);
-            }
+        // Substring match
+        if let Some(idx) = self.tracks.iter().position(|(k, _)| {
+            let decoded_cached = url_decode(k);
+            decoded.contains(&decoded_cached) || decoded_cached.contains(&decoded)
+        }) {
+            self.promote(idx);
+            return Some(&self.tracks[0].1);
         }
 
         None
     }
 
     /// Look up metadata by track name (case-insensitive).
-    ///
-    /// Used by the MediaRemote reader to match the Now Playing title
-    /// (e.g., "Nocturne") against cached API metadata for rich details.
-    pub fn lookup_by_name(&self, name: &str) -> Option<&TrackMetadata> {
+    pub fn lookup_by_name(&mut self, name: &str) -> Option<&TrackMetadata> {
         let lower = name.to_lowercase();
-        self.tracks.values().find(|meta| meta.name.to_lowercase() == lower)
+        if let Some(idx) = self.tracks.iter().position(|(_, meta)| meta.name.to_lowercase() == lower) {
+            self.promote(idx);
+            Some(&self.tracks[0].1)
+        } else {
+            None
+        }
     }
 
     /// Number of tracks in the cache
+    #[must_use]
     pub fn len(&self) -> usize {
         self.tracks.len()
     }
 
     /// Whether the cache is empty
+    #[must_use]
     pub fn is_empty(&self) -> bool {
         self.tracks.is_empty()
     }
 
-    /// Merge another ApiCacheData into this one, overwriting existing entries.
+    /// Merge another ApiCacheData into this one.
     pub fn merge(&mut self, other: &ApiCacheData) {
         for (key, value) in &other.tracks {
-            self.tracks.insert(key.clone(), value.clone());
+            self.insert(key.clone(), value.clone());
         }
     }
-}
 
-impl Clone for ApiCacheData {
-    fn clone(&self) -> Self {
-        Self {
-            tracks: self.tracks.clone(),
+    /// Move the entry at `idx` to position 0 (most recently used).
+    fn promote(&mut self, idx: usize) {
+        if idx > 0 {
+            let entry = self.tracks.remove(idx);
+            self.tracks.insert(0, entry);
         }
     }
 }
@@ -214,19 +240,14 @@ pub fn read_api_cache(app_support_path: &Path) -> Result<ApiCacheData> {
 
     if !cache_path.exists() {
         debug!("Cache path not found: {:?}", cache_path);
-        return Ok(ApiCacheData {
-            tracks: HashMap::new(),
-        });
+        return Ok(ApiCacheData::new());
     }
 
-    let mut tracks = HashMap::new();
+    let mut result = ApiCacheData::new();
 
     // Scan all *_0 metadata files for API response patterns
     let entries = fs::read_dir(&cache_path)?;
 
-    // Pre-compile regex for matching servings API URLs
-    let servings_re =
-        Regex::new(r"api\.brain\.fm/v3/users/[^/]+/servings/(recent|favorites)").unwrap();
 
     for entry in entries.flatten() {
         let filename = entry.file_name();
@@ -248,7 +269,7 @@ pub fn read_api_cache(app_support_path: &Path) -> Result<ApiCacheData> {
         let header_size = std::cmp::min(data.len(), 512);
         let header_text = String::from_utf8_lossy(&data[..header_size]);
 
-        if !servings_re.is_match(&header_text) {
+        if !SERVINGS_URL_RE.is_match(&header_text) {
             continue;
         }
 
@@ -263,7 +284,7 @@ pub fn read_api_cache(app_support_path: &Path) -> Result<ApiCacheData> {
                         parsed_tracks.len(),
                         filename_str
                     );
-                    tracks.extend(parsed_tracks);
+                    result.merge(&parsed_tracks);
                 }
                 Err(e) => {
                     trace!("Failed to parse JSON from {:?}: {}", filename_str, e);
@@ -275,9 +296,9 @@ pub fn read_api_cache(app_support_path: &Path) -> Result<ApiCacheData> {
         }
     }
 
-    debug!("API cache: loaded {} tracks total", tracks.len());
+    debug!("API cache: loaded {} tracks total", result.len());
 
-    Ok(ApiCacheData { tracks })
+    Ok(result)
 }
 
 /// Extract and decompress the JSON body from a Chromium cache entry.
@@ -342,14 +363,13 @@ fn find_json_end(json: &str) -> Option<usize> {
 /// This is the public entry point for both the cache reader (which decompresses
 /// cached responses) and the API client (which fetches live responses).
 pub fn parse_servings_json(json_body: &str) -> Result<ApiCacheData> {
-    let tracks = parse_servings_response(json_body)?;
-    Ok(ApiCacheData { tracks })
+    parse_servings_response(json_body)
 }
 
-/// Parse a Brain.fm servings API response and build a filename → metadata map
-fn parse_servings_response(json_body: &str) -> Result<HashMap<String, TrackMetadata>> {
+/// Parse a Brain.fm servings API response and build a filename → metadata cache
+fn parse_servings_response(json_body: &str) -> Result<ApiCacheData> {
     let response: ServingsResponse = serde_json::from_str(json_body)?;
-    let mut map = HashMap::new();
+    let mut cache = ApiCacheData::new();
 
     for serving in response.result {
         let metadata = build_track_metadata(&serving.track, &serving.track_variation);
@@ -357,11 +377,11 @@ fn parse_servings_response(json_body: &str) -> Result<HashMap<String, TrackMetad
         // Key by the filename from trackVariation.url (just the filename, no CDN prefix)
         if let Some(ref url) = serving.track_variation.url {
             let decoded_url = url_decode(url);
-            map.insert(decoded_url, metadata.clone());
+            cache.insert(decoded_url.clone(), metadata.clone());
 
             // Also key by the raw URL (before decoding) for encoded filenames
-            if url != &url_decode(url) {
-                map.insert(url.clone(), metadata.clone());
+            if *url != decoded_url {
+                cache.insert(url.clone(), metadata.clone());
             }
         }
 
@@ -369,14 +389,12 @@ fn parse_servings_response(json_body: &str) -> Result<HashMap<String, TrackMetad
         if let Some(ref cdn_url) = serving.track_variation.cdn_url {
             if let Some(filename) = extract_filename_from_url(cdn_url) {
                 let decoded = url_decode(&filename);
-                if !map.contains_key(&decoded) {
-                    map.insert(decoded, metadata);
-                }
+                cache.insert(decoded, metadata);
             }
         }
     }
 
-    Ok(map)
+    Ok(cache)
 }
 
 /// Build a `TrackMetadata` from parsed API data
@@ -469,15 +487,6 @@ fn extract_filename_from_url(url: &str) -> Option<String> {
     path.rsplit('/').next().map(|s| s.to_string())
 }
 
-/// Simple URL decode for common patterns
-fn url_decode(s: &str) -> String {
-    s.replace("%20", " ")
-        .replace("%2F", "/")
-        .replace("%3A", ":")
-        .replace("%3D", "=")
-        .replace("%26", "&")
-        .replace("%2B", "+")
-}
 
 #[cfg(test)]
 mod tests {
@@ -551,12 +560,12 @@ mod tests {
             ]
         }"#;
 
-        let tracks = parse_servings_response(json).unwrap();
+        let mut tracks = parse_servings_response(json).unwrap();
         assert_eq!(tracks.len(), 1);
 
         let meta = tracks
-            .get("Blooming_Sleep_DeepSleep_Atmospheric_60_120bpm_Nrmlzd2_VBR5.mp3")
-            .expect("Should find by filename");
+            .lookup_by_name("Blooming")
+            .expect("Should find by name");
 
         assert_eq!(meta.name, "Blooming");
         assert_eq!(meta.genre, Some("Atmospheric".to_string()));
@@ -587,12 +596,12 @@ mod tests {
             ]
         }"#;
 
-        let tracks = parse_servings_response(json).unwrap();
+        let mut tracks = parse_servings_response(json).unwrap();
 
-        // Should be findable by both decoded and CDN URL filename
+        // Should be findable by name
         let meta = tracks
-            .get("Stratosphere Relax Chill4 9hz Chris 90bpm_60mins 1_60mins_VBR5.mp3")
-            .expect("Should find by decoded filename");
+            .lookup_by_name("Stratosphere")
+            .expect("Should find by name");
 
         assert_eq!(meta.name, "Stratosphere");
         assert_eq!(meta.neural_effect, Some("High Neural Effect".to_string()));
@@ -619,8 +628,7 @@ mod tests {
             ]
         }"#;
 
-        let tracks = parse_servings_response(json).unwrap();
-        let cache = ApiCacheData { tracks };
+        let mut cache = parse_servings_response(json).unwrap();
 
         // Lookup by full CDN URL with query params (as found by lsof)
         let meta = cache
@@ -659,10 +667,144 @@ mod tests {
             ]
         }"#;
 
-        let tracks = parse_servings_response(json).unwrap();
-        let meta = tracks.get("ForestWalk_Sleep.mp3").unwrap();
+        let mut tracks = parse_servings_response(json).unwrap();
+        let meta = tracks.lookup_by_name("Forest Walk").unwrap();
 
         // Should skip "Nature" and use "Forest" as the genre
         assert_eq!(meta.genre, Some("Forest".to_string()));
+    }
+
+    // --- LRU cache unit tests ---
+
+    fn make_meta(name: &str) -> TrackMetadata {
+        TrackMetadata {
+            name: name.to_string(),
+            genre: None,
+            neural_effect: None,
+            neural_effect_level: None,
+            mental_state: None,
+            activity: None,
+            image_url: None,
+            bpm: None,
+            moods: vec![],
+            instruments: vec![],
+        }
+    }
+
+    #[test]
+    fn test_lru_capacity_enforced() {
+        let mut cache = ApiCacheData::new();
+        for i in 0..600 {
+            cache.insert(format!("track_{i}.mp3"), make_meta(&format!("Track {i}")));
+        }
+        assert_eq!(cache.len(), MAX_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn test_lru_promote_on_lookup() {
+        let mut cache = ApiCacheData::new();
+        cache.insert("a.mp3".to_string(), make_meta("A"));
+        cache.insert("b.mp3".to_string(), make_meta("B"));
+        cache.insert("c.mp3".to_string(), make_meta("C"));
+
+        // "a" is the oldest — promote it via lookup
+        let found = cache.lookup_by_name("A");
+        assert!(found.is_some());
+
+        // "a" should now be at front (index 0)
+        assert_eq!(cache.tracks[0].0, "a.mp3");
+    }
+
+    #[test]
+    fn test_lru_evicts_oldest() {
+        let mut cache = ApiCacheData::new();
+        for i in 0..MAX_CACHE_ENTRIES {
+            cache.insert(format!("track_{i}.mp3"), make_meta(&format!("Track {i}")));
+        }
+        // The oldest entry is track_0 (inserted first, pushed to end)
+        assert!(cache.lookup_by_name("Track 0").is_some());
+
+        // Insert one more — should evict the LRU (which is now whatever is at the end)
+        cache.insert("new_track.mp3".to_string(), make_meta("New"));
+        assert_eq!(cache.len(), MAX_CACHE_ENTRIES);
+    }
+
+    #[test]
+    fn test_lru_duplicate_insert_updates() {
+        let mut cache = ApiCacheData::new();
+        cache.insert("a.mp3".to_string(), make_meta("OldName"));
+        cache.insert("a.mp3".to_string(), make_meta("NewName"));
+
+        assert_eq!(cache.len(), 1);
+        let meta = cache.lookup_by_name("NewName");
+        assert!(meta.is_some());
+    }
+
+    #[test]
+    fn test_lru_merge_respects_capacity() {
+        let mut a = ApiCacheData::new();
+        for i in 0..300 {
+            a.insert(format!("a_{i}.mp3"), make_meta(&format!("A{i}")));
+        }
+        let mut b = ApiCacheData::new();
+        for i in 0..300 {
+            b.insert(format!("b_{i}.mp3"), make_meta(&format!("B{i}")));
+        }
+        a.merge(&b);
+        assert!(a.len() <= MAX_CACHE_ENTRIES);
+    }
+}
+
+#[cfg(test)]
+mod proptests {
+    use super::*;
+    use proptest::prelude::*;
+
+    fn arb_meta() -> impl Strategy<Value = TrackMetadata> {
+        "[a-z]{1,10}".prop_map(|name| TrackMetadata {
+            name,
+            genre: None,
+            neural_effect: None,
+            neural_effect_level: None,
+            mental_state: None,
+            activity: None,
+            image_url: None,
+            bpm: None,
+            moods: vec![],
+            instruments: vec![],
+        })
+    }
+
+    proptest! {
+        #[test]
+        fn prop_lru_never_exceeds_capacity(
+            entries in proptest::collection::vec(("[a-z0-9]{1,20}", arb_meta()), 0..800)
+        ) {
+            let mut cache = ApiCacheData::new();
+            for (key, meta) in entries {
+                cache.insert(key, meta);
+                prop_assert!(cache.len() <= MAX_CACHE_ENTRIES);
+            }
+        }
+
+        #[test]
+        fn prop_lru_insert_then_find(key in "[a-z]{1,10}", name in "[a-z]{1,10}") {
+            let mut cache = ApiCacheData::new();
+            let meta = TrackMetadata {
+                name: name.clone(),
+                genre: None,
+                neural_effect: None,
+                neural_effect_level: None,
+                mental_state: None,
+                activity: None,
+                image_url: None,
+                bpm: None,
+                moods: vec![],
+                instruments: vec![],
+            };
+            cache.insert(key, meta);
+            let found = cache.lookup_by_name(&name);
+            prop_assert!(found.is_some());
+        }
     }
 }

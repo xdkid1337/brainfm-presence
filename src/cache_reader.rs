@@ -16,24 +16,30 @@ use regex::Regex;
 use std::fs;
 use std::path::Path;
 use std::process::Command;
+use std::sync::LazyLock;
 
 use crate::api_cache_reader::ApiCacheData;
 use crate::BrainFmState;
 
-/// Simple URL decode for common patterns (mainly %20 for space)
-fn url_decode(s: &str) -> String {
-    s.replace("%20", " ")
-     .replace("%2F", "/")
-     .replace("%3A", ":")
-     .replace("%3D", "=")
-     .replace("%26", "&")
-}
+/// Regex for matching Brain.fm audio URLs in cache files
+static AUDIO_URL_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(https?://audio\d*\.brain\.fm/[^\s\x00"'<>]+\.mp3)"#).unwrap()
+});
+
+/// Regex for extracting .mp3 filename from a URL
+static MP3_FILENAME_RE: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r"/([^/?]+)\.mp3").unwrap()
+});
+
+
+use crate::util::url_decode;
+
 
 /// Read state from Cache directory.
 ///
 /// Accepts an optional `ApiCacheData` reference for enriching the detected
 /// audio URL with structured metadata from cached API responses.
-pub fn read_state(app_support_path: &Path, api_cache: Option<&ApiCacheData>) -> Result<BrainFmState> {
+pub fn read_state(app_support_path: &Path, api_cache: Option<&mut ApiCacheData>) -> Result<BrainFmState> {
     let cache_path = app_support_path
         .join("Cache")
         .join("Cache_Data");
@@ -74,7 +80,7 @@ pub fn read_state(app_support_path: &Path, api_cache: Option<&ApiCacheData>) -> 
 /// Strategy:
 /// 1. Try API cache lookup first (structured data, 100% accurate)
 /// 2. Fall back to heuristic filename parsing (lossy but always available)
-fn enrich_from_url(url: &str, mut state: BrainFmState, api_cache: Option<&ApiCacheData>) -> BrainFmState {
+fn enrich_from_url(url: &str, mut state: BrainFmState, api_cache: Option<&mut ApiCacheData>) -> BrainFmState {
     // Strategy 1: API cache lookup (rich structured metadata)
     if let Some(cache) = api_cache {
         if let Some(metadata) = cache.lookup_by_url(url) {
@@ -99,9 +105,10 @@ fn enrich_from_url(url: &str, mut state: BrainFmState, api_cache: Option<&ApiCac
 /// Returns true if at least one Cache_Data file handle is open.
 /// When Brain.fm is paused, it releases ALL Cache_Data handles.
 fn has_open_cache_files() -> Result<bool> {
-    let output = Command::new("lsof")
-        .args(["-c", "Brain.fm"])
-        .output()?;
+    let output = crate::util::run_command_with_timeout(
+        Command::new("lsof").args(["-c", "Brain.fm"]),
+        crate::util::DEFAULT_COMMAND_TIMEOUT,
+    )?;
     
     let stdout = String::from_utf8_lossy(&output.stdout);
     
@@ -111,9 +118,10 @@ fn has_open_cache_files() -> Result<bool> {
 /// Find audio URL by checking which cache file Brain.fm currently has open
 /// This is the most reliable method - lsof shows exactly what's being read
 fn find_audio_url_via_lsof(cache_path: &Path) -> Result<Option<String>> {
-    let output = Command::new("lsof")
-        .args(["-c", "Brain.fm"])
-        .output()?;
+    let output = crate::util::run_command_with_timeout(
+        Command::new("lsof").args(["-c", "Brain.fm"]),
+        crate::util::DEFAULT_COMMAND_TIMEOUT,
+    )?;
     
     let stdout = String::from_utf8_lossy(&output.stdout);
     
@@ -134,10 +142,7 @@ fn find_audio_url_via_lsof(cache_path: &Path) -> Result<Option<String>> {
                                 let search_size = std::cmp::min(content.len(), 32768);
                                 let content_str = String::from_utf8_lossy(&content[..search_size]);
                                 
-                                if let Some(caps) = Regex::new(r#"(https?://audio\d*\.brain\.fm/[^\s\x00"'<>]+\.mp3)"#)
-                                    .ok()
-                                    .and_then(|re| re.captures(&content_str))
-                                {
+                                if let Some(caps) = AUDIO_URL_RE.captures(&content_str) {
                                     if let Some(url_match) = caps.get(1) {
                                         return Ok(Some(url_match.as_str().to_string()));
                                     }
@@ -184,10 +189,7 @@ fn find_audio_url_by_atime(cache_path: &Path) -> Result<Option<String>> {
             let content_str = String::from_utf8_lossy(&content[..search_size]);
             
             // Look for brain.fm audio URLs - match various patterns
-            if let Some(captures) = Regex::new(r#"(https?://audio\d*\.brain\.fm/[^\s\x00"'<>]+\.mp3)"#)
-                .ok()
-                .and_then(|re| re.captures(&content_str)) 
-            {
+            if let Some(captures) = AUDIO_URL_RE.captures(&content_str) {
                 if let Some(url_match) = captures.get(1) {
                     return Ok(Some(url_match.as_str().to_string()));
                 }
@@ -203,7 +205,7 @@ fn find_audio_url_by_atime(cache_path: &Path) -> Result<Option<String>> {
 /// - https://audio2.brain.fm/Tied_In_Strings_Focus_Deep_Work_Electronic_30_120bpm_HighNEL_Nrmlzd2_VBR5.mp3
 /// - https://audio2.brain.fm/Eternity%20Ringing%20Bowls%20Focus%201%20Conor_1.2_Nrmlzd2_VBR5.mp3
 fn parse_audio_url(url: &str, mut state: BrainFmState) -> BrainFmState {
-    let re = Regex::new(r"/([^/?]+)\.mp3").unwrap();
+    let re = &*MP3_FILENAME_RE;
     
     if let Some(captures) = re.captures(url) {
         if let Some(filename) = captures.get(1) {
