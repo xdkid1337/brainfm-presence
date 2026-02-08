@@ -1,0 +1,64 @@
+name: Build and Release macOS DMG
+
+on:
+  push:
+    tags: ['v*']
+
+permissions:
+  contents: write
+
+jobs:
+  build-macos:
+    runs-on: macos-14
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Cache cargo registry and build
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-cargo-${{ hashFiles('**/Cargo.lock') }}
+
+      - name: Install cargo-bundle
+        run: cargo install cargo-bundle
+
+      - name: Install create-dmg
+        run: brew install create-dmg
+
+      - name: Build and bundle .app
+        run: cargo bundle --release --bin brainfm-presence
+
+      - name: Ad-hoc sign the .app bundle
+        run: |
+          codesign --force --deep --sign - \
+            "target/release/bundle/osx/Brain.fm Presence.app"
+
+      - name: Verify signature
+        run: |
+          codesign --verify --verbose \
+            "target/release/bundle/osx/Brain.fm Presence.app"
+
+      - name: Create DMG
+        run: |
+          create-dmg \
+            --volname "Brain.fm Presence" \
+            --window-size 600 400 \
+            --icon-size 128 \
+            --app-drop-link 450 200 \
+            "Brain.fm Presence.dmg" \
+            "target/release/bundle/osx/Brain.fm Presence.app"
+
+      - name: Ad-hoc sign the DMG
+        run: codesign --force --sign - "Brain.fm Presence.dmg"
+
+      - name: Upload DMG to Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: "Brain.fm Presence.dmg"
+          generate_release_notes: true
