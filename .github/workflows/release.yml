@@ -54,9 +54,6 @@ jobs:
             "Brain.fm Presence.dmg" \
             "target/release/bundle/osx/Brain.fm Presence.app"
 
-      - name: Ad-hoc sign the DMG
-        run: codesign --force --sign - "Brain.fm Presence.dmg"
-
       - name: Upload DMG to Release
         uses: softprops/action-gh-release@v2
         with:
