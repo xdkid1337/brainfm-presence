@@ -51,11 +51,11 @@ jobs:
             --window-size 600 400 \
             --icon-size 128 \
             --app-drop-link 450 200 \
-            "Brain.fm Presence.dmg" \
+            "Brain.fm-Presence.dmg" \
             "target/release/bundle/osx/Brain.fm Presence.app"
 
       - name: Upload DMG to Release
         uses: softprops/action-gh-release@v2
         with:
-          files: "Brain.fm Presence.dmg"
+          files: "Brain.fm-Presence.dmg"
           generate_release_notes: true
