@@ -33,13 +33,35 @@
 
 ## 🚀 Install
 
-### Download (Recommended)
+### Homebrew (Recommended)
 
-1. Grab **Brain.fm Presence.dmg** from [**Releases**](https://github.com/xdkid1337/brainfm-presence/releases)
-2. Open the image → drag to **Applications**
-3. Right-click → **Open** on first launch (macOS Gatekeeper)
+```bash
+brew install --cask xdkid1337/tap/brainfm-presence
+```
 
-> 💡 The app appears in your menu bar. That's it.
+### Manual Download
+
+1. Grab **Brain.fm-Presence.dmg** from [**Releases**](https://github.com/xdkid1337/brainfm-presence/releases)
+2. Open the DMG → drag **Brain.fm Presence** to **Applications**
+3. **Remove the quarantine flag** before first launch:
+   ```bash
+   xattr -cr "/Applications/Brain.fm Presence.app"
+   ```
+4. Open the app — it appears in your menu bar. That's it.
+
+<details>
+<summary><strong>Alternative: System Settings method</strong></summary>
+
+If you prefer not to use Terminal:
+
+1. Try opening the app — macOS will block it
+2. Go to **System Settings → Privacy & Security**
+3. Scroll down and click **"Open Anyway"** next to the blocked app
+4. Authenticate with your password
+
+> ⚠️ On macOS Sequoia 15.1+, the "Open Anyway" button may not appear. Use the `xattr -cr` command above instead.
+
+</details>
 
 ### Requirements
 
@@ -78,6 +100,19 @@ Requires [Rust 1.80+](https://rustup.rs)
 ---
 
 ## 🔧 Troubleshooting
+
+<details>
+<summary><strong>macOS says "cannot verify" or blocks the app?</strong></summary>
+
+This app is not notarized with Apple (it's open-source and free). Run this in Terminal to allow it:
+
+```bash
+xattr -cr "/Applications/Brain.fm Presence.app"
+```
+
+If you installed via Homebrew, this is handled automatically.
+
+</details>
 
 <details>
 <summary><strong>Discord presence not showing?</strong></summary>
