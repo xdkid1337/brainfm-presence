@@ -62,8 +62,7 @@ pub fn read_state() -> Option<MediaRemoteState> {
 
     debug!(
         "MediaRemote: Brain.fm playing={}, track={:?}",
-        info.playing,
-        track_name
+        info.playing, track_name
     );
 
     Some(MediaRemoteState {

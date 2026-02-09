@@ -88,8 +88,8 @@ fn main() -> Result<()> {
     // Hide from Dock and Cmd+Tab — tray-only mode
     #[cfg(target_os = "macos")]
     {
-        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
         use objc2::MainThreadMarker;
+        use objc2_app_kit::{NSApplication, NSApplicationActivationPolicy};
 
         // Safe: main() always runs on the main thread
         let mtm = unsafe { MainThreadMarker::new_unchecked() };
@@ -153,9 +153,12 @@ fn create_tray_icon() -> Result<(tray_icon::TrayIcon, MenuItem)> {
 
     // Build menu
     let menu = Menu::new();
-    menu.append(&status_item).context("Failed to append status item")?;
-    menu.append(&PredefinedMenuItem::separator()).context("Failed to append separator")?;
-    menu.append(&quit_item).context("Failed to append quit item")?;
+    menu.append(&status_item)
+        .context("Failed to append status item")?;
+    menu.append(&PredefinedMenuItem::separator())
+        .context("Failed to append separator")?;
+    menu.append(&quit_item)
+        .context("Failed to append quit item")?;
 
     // Create tray icon
     let tray_icon = TrayIconBuilder::new()
@@ -183,7 +186,11 @@ fn load_icon() -> Result<Icon> {
 }
 
 /// Background worker that reads Brain.fm state and updates Discord
-fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, shutdown_rx: mpsc::Receiver<()>) {
+#[allow(clippy::needless_pass_by_value)] // Both params are consumed by the thread closure
+fn run_background_worker(
+    proxy: winit::event_loop::EventLoopProxy<UserEvent>,
+    shutdown_rx: mpsc::Receiver<()>,
+) {
     // Create Brain.fm reader
     let mut reader = match BrainFmReader::new() {
         Ok(r) => r,
@@ -197,7 +204,7 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
     // Try to connect to Discord
     info!("🔗 Connecting to Discord...");
     let mut client = create_discord_client();
-    
+
     if client.is_some() {
         info!("✅ Connected to Discord!");
     } else {
@@ -205,6 +212,8 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
     }
 
     let mut last_state: Option<BrainFmState> = None;
+    // Safety: u64 -> i64 wrap is harmless for Unix timestamps until year 292 billion
+    #[allow(clippy::cast_possible_wrap)]
     let mut track_start = std::time::SystemTime::now()
         .duration_since(std::time::UNIX_EPOCH)
         .expect("system clock before UNIX epoch")
@@ -248,10 +257,13 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
                 // Check if track changed - reset timer
                 let current_track = state.track_name.clone();
                 if current_track != last_track {
-                    track_start = std::time::SystemTime::now()
+                    // Safety: u64 -> i64 wrap is harmless for Unix timestamps until year 292 billion
+                    #[allow(clippy::cast_possible_wrap)]
+                    let new_start = std::time::SystemTime::now()
                         .duration_since(std::time::UNIX_EPOCH)
                         .expect("system clock before UNIX epoch")
                         .as_secs() as i64;
+                    track_start = new_start;
                     last_track = current_track;
                 }
 
@@ -280,7 +292,8 @@ fn run_background_worker(proxy: winit::event_loop::EventLoopProxy<UserEvent>, sh
             }
             Err(e) => {
                 debug!("Error reading state: {e}");
-                let _ = proxy.send_event(UserEvent::StatusUpdate("Brain.fm not running".to_string()));
+                let _ =
+                    proxy.send_event(UserEvent::StatusUpdate("Brain.fm not running".to_string()));
             }
         }
 
@@ -346,7 +359,7 @@ fn update_discord_presence(
     client: &mut DiscordIpcClient,
     state: &BrainFmState,
     session_start: i64,
-) -> Result<(), Box<dyn std::error::Error>> {
+) -> anyhow::Result<()> {
     if !state.is_playing {
         client.clear_activity()?;
         return Ok(());
@@ -354,7 +367,10 @@ fn update_discord_presence(
 
     // Build strings: details = track name, state = mode (or activity)
     let state_text = state.mode.clone().unwrap_or_else(|| "Focus".to_string());
-    let details = state.track_name.clone().unwrap_or_else(|| "Brain.fm".to_string());
+    let details = state
+        .track_name
+        .clone()
+        .unwrap_or_else(|| "Brain.fm".to_string());
 
     // Large image: prefer track-specific image from API cache, fall back to mode image from CDN
     let large_image_owned;
@@ -381,11 +397,14 @@ fn update_discord_presence(
         .unwrap_or_else(|| "Neural Effect Level".to_string());
 
     // Small image = genre from Brain.fm CDN (case-insensitive)
-    let small_image = state
+    let small_image = state.genre.as_deref().map_or(
+        "https://cdn.brain.fm/icons/electronic.png",
+        brainfm_presence::util::genre_icon_url,
+    );
+    let small_text = state
         .genre
-        .as_deref()
-        .map_or("https://cdn.brain.fm/icons/electronic.png", brainfm_presence::util::genre_icon_url);
-    let small_text = state.genre.clone().unwrap_or_else(|| "Brain.fm".to_string());
+        .clone()
+        .unwrap_or_else(|| "Brain.fm".to_string());
 
     // Build activity with ActivityType::Listening for "Listening to brain.fm"
     let timestamps = activity::Timestamps::new().start(session_start);
@@ -407,4 +426,3 @@ fn update_discord_presence(
 
     Ok(())
 }
-

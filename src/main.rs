@@ -1,16 +1,16 @@
 //! Brain.fm Discord Rich Presence
-//! 
+//!
 //! This is a proof-of-concept that reads the current Brain.fm state
 //! and displays it for potential Discord Rich Presence integration.
 
 use anyhow::Result;
-use brainfm_presence::{BrainFmReader, BrainFmState};
 use brainfm_presence::util::truncate;
+use brainfm_presence::{BrainFmReader, BrainFmState};
 
 fn main() -> Result<()> {
     println!("🧠 Brain.fm Presence Reader - PoC");
     println!("==================================\n");
-    
+
     // Create reader
     let mut reader = match BrainFmReader::new() {
         Ok(r) => r,
@@ -20,25 +20,25 @@ fn main() -> Result<()> {
             return Err(e);
         }
     };
-    
+
     // Check if Brain.fm is running
     if reader.is_running() {
         println!("✅ Brain.fm is running!\n");
     } else {
         println!("⚠️  Brain.fm is not currently running.");
         println!("   Start Brain.fm and run this program again.\n");
-        
+
         // Still try to read cached state from LevelDB
         println!("📁 Reading cached state from local storage...\n");
     }
-    
+
     // Read current state
     println!("📊 Reading Brain.fm state...\n");
-    
+
     match reader.read_state() {
         Ok(state) => {
             print_state(&state);
-            
+
             println!("\n📝 For Discord Rich Presence:");
             println!("   State: {}", state.to_presence_string());
             if let Some(details) = state.to_details_string() {
@@ -49,27 +49,27 @@ fn main() -> Result<()> {
             eprintln!("❌ Error reading state: {e}");
         }
     }
-    
+
     // Also run individual readers for debugging
     println!("\n\n🔍 Debug: Individual Reader Results");
     println!("=====================================\n");
-    
+
     // LevelDB reader
     println!("📂 LevelDB Reader:");
     match brainfm_presence::leveldb_reader::read_state(
         &dirs::home_dir()
-            .unwrap()
+            .expect("home directory not found")
             .join("Library/Application Support/Brain.fm"),
     ) {
         Ok(state) => print_state_compact(&state, "   "),
         Err(e) => println!("   ❌ Error: {e}"),
     }
-    
+
     // Cache reader (standalone, without API cache enrichment)
     println!("\n💾 Cache Reader (standalone):");
     match brainfm_presence::cache_reader::read_state(
         &dirs::home_dir()
-            .unwrap()
+            .expect("home directory not found")
             .join("Library/Application Support/Brain.fm"),
         None,
     ) {
@@ -80,7 +80,7 @@ fn main() -> Result<()> {
     // Direct API client
     println!("\n🔑 Direct API Client:");
     let app_path = dirs::home_dir()
-        .unwrap()
+        .expect("home directory not found")
         .join("Library/Application Support/Brain.fm");
     match brainfm_presence::api_client::fetch_recent_tracks(&app_path) {
         Ok(Some(data)) => {
@@ -110,7 +110,8 @@ fn main() -> Result<()> {
     match brainfm_presence::media_remote_reader::read_state() {
         Some(mr) => {
             println!("   ✅ Brain.fm detected via MediaRemote");
-            println!("   Playing: {} | Track: {} | Elapsed: {:.0}s / {:.0}s",
+            println!(
+                "   Playing: {} | Track: {} | Elapsed: {:.0}s / {:.0}s",
                 if mr.is_playing { "Yes" } else { "No" },
                 mr.track_name.as_deref().unwrap_or("(none)"),
                 mr.elapsed_secs.unwrap_or(0.0),
@@ -121,7 +122,7 @@ fn main() -> Result<()> {
             println!("   (Brain.fm not detected as Now Playing app)");
         }
     }
-    
+
     Ok(())
 }
 
@@ -129,23 +130,30 @@ fn print_state(state: &BrainFmState) {
     println!("┌─────────────────────────────────────┐");
     println!("│ 🧠 Brain.fm Current State           │");
     println!("├─────────────────────────────────────┤");
-    
+
     if let Some(ref mode) = state.mode {
         println!("│ Mode:          {mode:20} │");
     } else {
         println!("│ Mode:          {:20} │", "(unknown)");
     }
-    
-    println!("│ Playing:       {:20} │", if state.is_playing { "Yes ▶️" } else { "No ⏸️" });
-    
+
+    println!(
+        "│ Playing:       {:20} │",
+        if state.is_playing {
+            "Yes ▶️"
+        } else {
+            "No ⏸️"
+        }
+    );
+
     if let Some(ref session_state) = state.session_state {
         println!("│ Session:       {session_state:20} │");
     }
-    
+
     if let Some(ref time) = state.session_time {
         println!("│ Time:          {time:20} │");
     }
-    
+
     if let Some(ref track) = state.track_name {
         println!("│ Track:         {:20} │", truncate(track, 20));
     }
@@ -165,21 +173,21 @@ fn print_state(state: &BrainFmState) {
     if let Some(ref image_url) = state.image_url {
         println!("│ Image:         {:20} │", truncate(image_url, 20));
     }
-    
+
     if state.infinite_play {
         println!("│ Infinite Play: {:20} │", "Enabled ∞");
     }
-    
+
     if state.adhd_mode {
         println!("│ ADHD Mode:     {:20} │", "Enabled 🧠");
     }
-    
+
     println!("└─────────────────────────────────────┘");
 }
 
 fn print_state_compact(state: &BrainFmState, prefix: &str) {
     let mut fields = Vec::new();
-    
+
     if let Some(ref mode) = state.mode {
         fields.push(format!("Mode: {mode}"));
     }
@@ -192,7 +200,7 @@ fn print_state_compact(state: &BrainFmState, prefix: &str) {
     if state.adhd_mode {
         fields.push("ADHD: Yes".to_string());
     }
-    
+
     if fields.is_empty() {
         println!("{prefix}(no data)");
     } else {

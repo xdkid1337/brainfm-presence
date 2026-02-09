@@ -13,12 +13,12 @@
 //! 5. We decompress and parse the JSON to build a filename → metadata lookup table
 //! 6. The cache reader matches the currently playing audio URL against this table
 
+use crate::util::url_decode;
 use anyhow::Result;
 use flate2::read::GzDecoder;
 use log::{debug, trace};
 use regex::Regex;
 use serde::Deserialize;
-use crate::util::url_decode;
 
 use std::fs;
 use std::io::Read;
@@ -81,9 +81,7 @@ impl ApiCacheData {
     /// Create a new empty cache
     #[must_use]
     pub fn new() -> Self {
-        Self {
-            tracks: Vec::new(),
-        }
+        Self { tracks: Vec::new() }
     }
 
     /// Insert a key-value pair, enforcing the capacity bound.
@@ -128,7 +126,11 @@ impl ApiCacheData {
     /// Look up metadata by track name (case-insensitive).
     pub fn lookup_by_name(&mut self, name: &str) -> Option<&TrackMetadata> {
         let lower = name.to_lowercase();
-        if let Some(idx) = self.tracks.iter().position(|(_, meta)| meta.name.to_lowercase() == lower) {
+        if let Some(idx) = self
+            .tracks
+            .iter()
+            .position(|(_, meta)| meta.name.to_lowercase() == lower)
+        {
             self.promote(idx);
             Some(&self.tracks[0].1)
         } else {
@@ -248,7 +250,6 @@ pub fn read_api_cache(app_support_path: &Path) -> Result<ApiCacheData> {
     // Scan all *_0 metadata files for API response patterns
     let entries = fs::read_dir(&cache_path)?;
 
-
     for entry in entries.flatten() {
         let filename = entry.file_name();
         let filename_str = filename.to_string_lossy();
@@ -328,8 +329,7 @@ fn extract_json_body(data: &[u8]) -> Option<String> {
 
 /// Find the start position of gzip data (magic bytes 0x1F 0x8B)
 fn find_gzip_start(data: &[u8]) -> Option<usize> {
-    data.windows(2)
-        .position(|w| w[0] == 0x1F && w[1] == 0x8B)
+    data.windows(2).position(|w| w[0] == 0x1F && w[1] == 0x8B)
 }
 
 /// Decompress gzip data to a UTF-8 string
@@ -340,10 +340,29 @@ fn decompress_gzip(data: &[u8]) -> Result<String> {
     Ok(output)
 }
 
-/// Find the end of a JSON object by counting braces
+/// Find the end of a JSON object by counting braces, aware of string context.
+///
+/// Braces inside string values (even escaped quotes) are correctly skipped.
 fn find_json_end(json: &str) -> Option<usize> {
     let mut depth = 0;
+    let mut in_string = false;
+    let mut escape = false;
     for (i, ch) in json.char_indices() {
+        if escape {
+            escape = false;
+            continue;
+        }
+        if ch == '\\' && in_string {
+            escape = true;
+            continue;
+        }
+        if ch == '"' {
+            in_string = !in_string;
+            continue;
+        }
+        if in_string {
+            continue;
+        }
         match ch {
             '{' => depth += 1,
             '}' => {
@@ -486,7 +505,6 @@ fn extract_filename_from_url(url: &str) -> Option<String> {
     // Get the last path segment
     path.rsplit('/').next().map(|s| s.to_string())
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -648,6 +666,20 @@ mod tests {
     }
 
     #[test]
+    fn test_find_json_end_braces_in_strings() {
+        // Braces inside string values should be ignored
+        let input = r#"{"name": "Track {Remix}"}"#;
+        assert_eq!(find_json_end(input), Some(input.len()));
+    }
+
+    #[test]
+    fn test_find_json_end_escaped_quotes() {
+        // Escaped quotes inside strings should not break string tracking
+        let input = r#"{"name": "Track \"quoted\""}"#;
+        assert_eq!(find_json_end(input), Some(input.len()));
+    }
+
+    #[test]
     fn test_genre_excludes_nature() {
         let json = r#"{
             "result": [
@@ -805,6 +837,18 @@ mod proptests {
             cache.insert(key, meta);
             let found = cache.lookup_by_name(&name);
             prop_assert!(found.is_some());
+        }
+
+        #[test]
+        fn prop_find_json_end_roundtrip(
+            key in "[a-zA-Z]{1,20}",
+            value in "[a-zA-Z0-9 {}\\\\\"]{0,50}"
+        ) {
+            // Build a valid JSON object and verify find_json_end returns correct length
+            let json_obj = serde_json::json!({ key: value });
+            let serialized = serde_json::to_string(&json_obj).unwrap();
+            let result = find_json_end(&serialized);
+            prop_assert_eq!(result, Some(serialized.len()));
         }
     }
 }

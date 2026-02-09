@@ -18,10 +18,10 @@ use std::path::PathBuf;
 pub trait Platform {
     /// Get the Brain.fm application support directory
     fn get_brainfm_data_dir() -> Result<PathBuf>;
-    
+
     /// Check if Brain.fm is currently running
     fn is_brainfm_running() -> bool;
-    
+
     /// Get the platform name for logging
     fn name() -> &'static str;
 }

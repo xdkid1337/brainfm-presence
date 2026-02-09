@@ -22,7 +22,6 @@ pub mod cache_reader;
 pub mod leveldb_reader;
 pub mod media_remote_reader;
 pub mod platform;
-pub mod tray;
 pub mod util;
 
 /// Represents the current state of Brain.fm playback
@@ -89,30 +88,30 @@ impl BrainFmState {
             self.mode = Some(ms.clone());
         }
     }
-    
+
     /// Get a display string for Discord Rich Presence
     pub fn to_presence_string(&self) -> String {
         let mut parts = Vec::new();
-        
+
         if let Some(ref mode) = self.mode {
             parts.push(mode.clone());
         }
-        
+
         if let Some(ref state) = self.session_state {
             parts.push(format!("({})", state));
         }
-        
+
         if let Some(ref time) = self.session_time {
             parts.push(format!("[{}]", time));
         }
-        
+
         if parts.is_empty() {
             "Brain.fm".to_string()
         } else {
             parts.join(" ")
         }
     }
-    
+
     /// Get details string for Discord Rich Presence.
     ///
     /// Format: "Track Name • Genre • Neural Effect"
@@ -148,7 +147,7 @@ const API_REFRESH_INTERVAL: u32 = 6;
 pub struct BrainFmReader {
     /// Path to Brain.fm app support directory
     app_support_path: PathBuf,
-    
+
     /// In-memory cache of API responses to persist metadata even if token expires
     memory_cache: api_cache_reader::ApiCacheData,
 
@@ -212,16 +211,20 @@ impl BrainFmReader {
                     // Try to enrich from memory cache
                     if let Some(ref title) = current_track {
                         if let Some(metadata) = self.memory_cache.lookup_by_name(title) {
-                            let has_complete = metadata.neural_effect.is_some()
-                                && metadata.image_url.is_some();
+                            let has_complete =
+                                metadata.neural_effect.is_some() && metadata.image_url.is_some();
 
                             if !track_changed && has_complete {
                                 // Fast path: same track, complete data — no I/O needed
-                                debug!("Fast path: '{}' fully cached in memory, skipping disk I/O", title);
+                                debug!(
+                                    "Fast path: '{}' fully cached in memory, skipping disk I/O",
+                                    title
+                                );
                                 state.is_playing = true;
                                 state.track_name = Some(metadata.name.clone());
                                 state.genre = metadata.genre.clone().or(state.genre);
-                                state.neural_effect = metadata.neural_effect.clone().or(state.neural_effect);
+                                state.neural_effect =
+                                    metadata.neural_effect.clone().or(state.neural_effect);
                                 state.mental_state_or_mode(metadata);
                                 state.activity = metadata.activity.clone().or(state.activity);
                                 state.image_url = metadata.image_url.clone().or(state.image_url);
@@ -239,27 +242,29 @@ impl BrainFmReader {
 
         // 3. Full path: read disk cache + lsof (needed for first detection or incomplete data)
         let mut combined_cache = self.memory_cache.clone();
-        
+
         if let Ok(disk_cache) = api_cache_reader::read_api_cache(&self.app_support_path) {
             combined_cache.merge(&disk_cache);
         }
 
         if !combined_cache.is_empty() {
-             debug!("Combined cache: {} tracks available (Memory: {}, Total unique: {})", 
-                combined_cache.len(), self.memory_cache.len(), combined_cache.len());
+            debug!(
+                "Combined cache: {} tracks available (Memory: {}, Total unique: {})",
+                combined_cache.len(),
+                self.memory_cache.len(),
+                combined_cache.len()
+            );
         }
 
         // 4. Cache reader — detect what's currently playing via lsof
-        let cache_state = match cache_reader::read_state(
-            &self.app_support_path,
-            Some(&mut combined_cache),
-        ) {
-            Ok(s) => s,
-            Err(e) => {
-                debug!("Cache reader error: {}", e);
-                BrainFmState::new()
-            }
-        };
+        let cache_state =
+            match cache_reader::read_state(&self.app_support_path, Some(&mut combined_cache)) {
+                Ok(s) => s,
+                Err(e) => {
+                    debug!("Cache reader error: {}", e);
+                    BrainFmState::new()
+                }
+            };
 
         // 5. Determine if playing — lsof is primary, MediaRemote is fallback
         let (is_playing, current_track_key, detection_source) = if cache_state.is_playing {
@@ -292,24 +297,28 @@ impl BrainFmReader {
         let has_complete_metadata = cache_state.track_name.is_some()
             && cache_state.neural_effect.is_some()
             && cache_state.image_url.is_some();
-        let periodic_refresh = !has_complete_metadata
-            && self.api_refresh_counter >= API_REFRESH_INTERVAL;
+        let periodic_refresh =
+            !has_complete_metadata && self.api_refresh_counter >= API_REFRESH_INTERVAL;
 
         let should_call_api = track_changed || periodic_refresh;
 
         if should_call_api {
             if track_changed {
-                debug!("Track changed ({:?} → {:?}), calling API for fresh metadata [detected by {}]",
-                    self.last_api_track, current_track_key, detection_source);
+                debug!(
+                    "Track changed ({:?} → {:?}), calling API for fresh metadata [detected by {}]",
+                    self.last_api_track, current_track_key, detection_source
+                );
             } else {
-                debug!("Incomplete metadata, periodic API refresh (cycle {}) [detected by {}]",
-                    self.api_refresh_counter, detection_source);
+                debug!(
+                    "Incomplete metadata, periodic API refresh (cycle {}) [detected by {}]",
+                    self.api_refresh_counter, detection_source
+                );
             }
 
             match api_client::fetch_recent_tracks(&self.app_support_path) {
                 Ok(Some(api_data)) if !api_data.is_empty() => {
                     debug!("Direct API: {} tracks loaded", api_data.len());
-                    
+
                     // Update memory cache with fresh data
                     self.memory_cache.merge(&api_data);
                     combined_cache.merge(&api_data);
@@ -331,10 +340,9 @@ impl BrainFmReader {
         // 7. Enrich track data depending on detection source
         if detection_source == "lsof" {
             // Re-run cache reader with (potentially) API-enriched combined cache
-            if let Ok(enriched_state) = cache_reader::read_state(
-                &self.app_support_path,
-                Some(&mut combined_cache),
-            ) {
+            if let Ok(enriched_state) =
+                cache_reader::read_state(&self.app_support_path, Some(&mut combined_cache))
+            {
                 state = Self::merge_state(state, enriched_state);
             } else {
                 state = Self::merge_state(state, cache_state);
@@ -352,7 +360,10 @@ impl BrainFmReader {
                     state.activity = metadata.activity.clone().or(state.activity);
                     state.image_url = metadata.image_url.clone().or(state.image_url);
                 } else {
-                    debug!("MediaRemote: no cache/API match for '{}', using raw title", title);
+                    debug!(
+                        "MediaRemote: no cache/API match for '{}', using raw title",
+                        title
+                    );
                     state.track_name = Some(title.clone());
                 }
             }
@@ -408,18 +419,30 @@ mod tests {
 
     #[test]
     fn test_merge_state_is_playing_from_overlay() {
-        let base = BrainFmState { is_playing: true, ..Default::default() };
-        let overlay = BrainFmState { is_playing: false, ..Default::default() };
+        let base = BrainFmState {
+            is_playing: true,
+            ..Default::default()
+        };
+        let overlay = BrainFmState {
+            is_playing: false,
+            ..Default::default()
+        };
         let merged = BrainFmReader::merge_state(base, overlay);
         assert!(!merged.is_playing); // overlay wins even if false
     }
 
     #[test]
     fn test_merge_state_bool_or() {
-        let base = BrainFmState { adhd_mode: true, ..Default::default() };
-        let overlay = BrainFmState { infinite_play: true, ..Default::default() };
+        let base = BrainFmState {
+            adhd_mode: true,
+            ..Default::default()
+        };
+        let overlay = BrainFmState {
+            infinite_play: true,
+            ..Default::default()
+        };
         let merged = BrainFmReader::merge_state(base, overlay);
-        assert!(merged.adhd_mode);     // base true || overlay false
+        assert!(merged.adhd_mode); // base true || overlay false
         assert!(merged.infinite_play); // base false || overlay true
     }
 

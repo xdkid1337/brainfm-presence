@@ -49,8 +49,14 @@ fn macos_test() {
         println!("   │ Bundle ID:     {:30} │", info.bundle_identifier);
         println!("   │ Playing:       {:30} │", info.playing);
         println!("   │ Title:         {:30} │", truncate(&info.title, 30));
-        println!("   │ Artist:        {:30} │", info.artist.as_deref().unwrap_or("(none)"));
-        println!("   │ Album:         {:30} │", info.album.as_deref().unwrap_or("(none)"));
+        println!(
+            "   │ Artist:        {:30} │",
+            info.artist.as_deref().unwrap_or("(none)")
+        );
+        println!(
+            "   │ Album:         {:30} │",
+            info.album.as_deref().unwrap_or("(none)")
+        );
         if let Some(dur) = info.duration {
             println!("   │ Duration:      {dur:>27.1}s │");
         } else {
@@ -73,7 +79,10 @@ fn macos_test() {
         // Check if this is Brain.fm
         let is_brainfm = info.bundle_identifier.to_lowercase().contains("brain")
             || info.bundle_identifier.to_lowercase().contains("brainfm")
-            || info.artist.as_deref().is_some_and(|a| a.to_lowercase().contains("brain"));
+            || info
+                .artist
+                .as_deref()
+                .is_some_and(|a| a.to_lowercase().contains("brain"));
 
         println!();
         if is_brainfm {

@@ -4,18 +4,62 @@
 //! See: design.md §6 "Shared Utility Module"
 
 use anyhow::{Context, Result};
+use regex::Regex;
 use std::path::Path;
 use std::process::{Command, Output, Stdio};
+use std::sync::LazyLock;
 use std::time::{Duration, Instant};
 
 /// Default timeout for external commands (lsof, pgrep, etc.)
 pub const DEFAULT_COMMAND_TIMEOUT: Duration = Duration::from_secs(5);
 
 // ---------------------------------------------------------------------------
+// Shared regex and constants
+// ---------------------------------------------------------------------------
+
+/// Regex for extracting .mp3 filename from a URL.
+///
+/// Shared between `cache_reader` and `leveldb_reader`.
+pub static MP3_FILENAME_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r"/([^/?]+)\.mp3").unwrap());
+
+/// Known Brain.fm genres for heuristic filename parsing (lowercase).
+///
+/// Union of genres used across `cache_reader` and `leveldb_reader`.
+pub const KNOWN_GENRES: &[&str] = &[
+    "piano",
+    "electronic",
+    "lofi",
+    "ambient",
+    "nature",
+    "atmospheric",
+    "grooves",
+    "cinematic",
+    "classical",
+    "acoustic",
+    "drone",
+    "postrock",
+    "chimes",
+    "rain",
+    "forest",
+    "thunder",
+    "beach",
+    "night",
+    "river",
+    "wind",
+    "underwater",
+];
+
+// ---------------------------------------------------------------------------
 // URL decoding
 // ---------------------------------------------------------------------------
 
 /// Simple URL decode for common percent-encoded patterns.
+///
+/// **Not general-purpose.** Only decodes a small, hardcoded set of
+/// percent-encoded sequences (`%20`, `%2F`, `%3A`, `%3D`, `%26`, `%2B`)
+/// commonly found in Brain.fm audio URLs. Does not handle arbitrary
+/// percent-encoding, multi-byte UTF-8 sequences, or `+` as space.
 ///
 /// Shared between `cache_reader` and `api_cache_reader`.
 pub fn url_decode(s: &str) -> String {
@@ -208,7 +252,11 @@ pub fn run_command_with_timeout(cmd: &mut Command, timeout: Duration) -> Result<
     let stdout = stdout_thread.join().unwrap_or_default();
     let stderr = stderr_thread.join().unwrap_or_default();
 
-    Ok(Output { status, stdout, stderr })
+    Ok(Output {
+        status,
+        stdout,
+        stderr,
+    })
 }
 
 // ---------------------------------------------------------------------------
@@ -316,21 +364,17 @@ mod tests {
 
     #[test]
     fn test_command_with_timeout_success() {
-        let output = run_command_with_timeout(
-            Command::new("echo").arg("hello"),
-            Duration::from_secs(5),
-        )
-        .unwrap();
+        let output =
+            run_command_with_timeout(Command::new("echo").arg("hello"), Duration::from_secs(5))
+                .unwrap();
         assert!(output.status.success());
         assert!(String::from_utf8_lossy(&output.stdout).contains("hello"));
     }
 
     #[test]
     fn test_command_with_timeout_times_out() {
-        let result = run_command_with_timeout(
-            Command::new("sleep").arg("10"),
-            Duration::from_secs(1),
-        );
+        let result =
+            run_command_with_timeout(Command::new("sleep").arg("10"), Duration::from_secs(1));
         assert!(result.is_err());
         let err = result.unwrap_err().to_string();
         assert!(err.contains("timed out"));

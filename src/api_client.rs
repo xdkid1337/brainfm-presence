@@ -15,7 +15,7 @@ use std::path::Path;
 use std::sync::LazyLock;
 use std::time::{Duration, SystemTime, UNIX_EPOCH};
 
-use crate::api_cache_reader::{ApiCacheData, parse_servings_json};
+use crate::api_cache_reader::{parse_servings_json, ApiCacheData};
 
 /// Regex for matching JWT tokens
 static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
@@ -23,14 +23,12 @@ static JWT_RE: LazyLock<Regex> = LazyLock::new(|| {
 });
 
 /// Regex for extracting user ID from persist:auth
-static USER_ID_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#""userId":\s*"\\?"([A-Za-z0-9_\-]+)\\?""#).unwrap()
-});
+static USER_ID_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""userId":\s*"\\?"([A-Za-z0-9_\-]+)\\?""#).unwrap());
 
 /// Regex for extracting exp claim from JWT payload
-static EXP_RE: LazyLock<Regex> = LazyLock::new(|| {
-    Regex::new(r#""exp"\s*:\s*([0-9]+(?:\.[0-9]+)?)"#).unwrap()
-});
+static EXP_RE: LazyLock<Regex> =
+    LazyLock::new(|| Regex::new(r#""exp"\s*:\s*([0-9]+(?:\.[0-9]+)?)"#).unwrap());
 
 /// Shared HTTP agent with connection pooling and timeouts
 static HTTP_AGENT: LazyLock<ureq::Agent> = LazyLock::new(|| {
@@ -68,7 +66,12 @@ pub fn fetch_recent_tracks(app_support_path: &Path) -> Result<Option<ApiCacheDat
         // Apply delay (0 on first attempt)
         let delay = RETRY_DELAYS[attempt];
         if delay > 0 {
-            debug!("API retry {}/{}: waiting {}s before next attempt", attempt + 1, max_attempts, delay);
+            debug!(
+                "API retry {}/{}: waiting {}s before next attempt",
+                attempt + 1,
+                max_attempts,
+                delay
+            );
             std::thread::sleep(Duration::from_secs(delay));
         }
 
@@ -76,19 +79,32 @@ pub fn fetch_recent_tracks(app_support_path: &Path) -> Result<Option<ApiCacheDat
         let auth = match extract_auth(app_support_path) {
             Ok(Some(a)) => a,
             Ok(None) => {
-                debug!("No auth token found in LevelDB (attempt {}/{})", attempt + 1, max_attempts);
+                debug!(
+                    "No auth token found in LevelDB (attempt {}/{})",
+                    attempt + 1,
+                    max_attempts
+                );
                 // No token at all — no point retrying
                 return Ok(None);
             }
             Err(e) => {
-                warn!("Failed to extract auth (attempt {}/{}): {}", attempt + 1, max_attempts, e);
+                warn!(
+                    "Failed to extract auth (attempt {}/{}): {}",
+                    attempt + 1,
+                    max_attempts,
+                    e
+                );
                 continue;
             }
         };
 
         // 2. Check if token is expired (with safety buffer)
         if is_token_expired(&auth.token) {
-            debug!("Access token is expired (attempt {}/{}), will retry to pick up refreshed token", attempt + 1, max_attempts);
+            debug!(
+                "Access token is expired (attempt {}/{}), will retry to pick up refreshed token",
+                attempt + 1,
+                max_attempts
+            );
             continue;
         }
 
@@ -98,9 +114,15 @@ pub fn fetch_recent_tracks(app_support_path: &Path) -> Result<Option<ApiCacheDat
             auth.user_id
         );
 
-        debug!("Fetching recent tracks from API (attempt {}/{}): {}", attempt + 1, max_attempts, url);
+        debug!(
+            "Fetching recent tracks from API (attempt {}/{}): {}",
+            attempt + 1,
+            max_attempts,
+            url
+        );
 
-        match HTTP_AGENT.get(&url)
+        match HTTP_AGENT
+            .get(&url)
             .header("Authorization", &format!("Bearer {}", auth.token))
             .header("Accept", "application/json")
             .call()
@@ -117,17 +139,30 @@ pub fn fetch_recent_tracks(app_support_path: &Path) -> Result<Option<ApiCacheDat
                 continue;
             }
             Err(ureq::Error::StatusCode(code)) => {
-                warn!("API returned HTTP {} (attempt {}/{})", code, attempt + 1, max_attempts);
+                warn!(
+                    "API returned HTTP {} (attempt {}/{})",
+                    code,
+                    attempt + 1,
+                    max_attempts
+                );
                 continue;
             }
             Err(e) => {
-                warn!("API request failed (attempt {}/{}): {}", attempt + 1, max_attempts, e);
+                warn!(
+                    "API request failed (attempt {}/{}): {}",
+                    attempt + 1,
+                    max_attempts,
+                    e
+                );
                 continue;
             }
         }
     }
 
-    debug!("All {} API attempts exhausted, returning None", max_attempts);
+    debug!(
+        "All {} API attempts exhausted, returning None",
+        max_attempts
+    );
     Ok(None)
 }
 
@@ -249,11 +284,16 @@ mod tests {
             .as_secs();
         let exp_soon = now + 15; // expires in 15s
         let header = BASE64_URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
-        let payload = BASE64_URL_SAFE_NO_PAD.encode(
-            format!(r#"{{"_id":"test","exp":{},"iat":{}}}"#, exp_soon, exp_soon - 300)
-        );
+        let payload = BASE64_URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"_id":"test","exp":{},"iat":{}}}"#,
+            exp_soon,
+            exp_soon - 300
+        ));
         let token = format!("{}.{}.fakesig", header, payload);
-        assert!(is_token_expired(&token), "Token expiring in 15s should be treated as expired");
+        assert!(
+            is_token_expired(&token),
+            "Token expiring in 15s should be treated as expired"
+        );
     }
 
     #[test]
@@ -265,10 +305,15 @@ mod tests {
             .as_secs();
         let exp_later = now + 60; // expires in 60s
         let header = BASE64_URL_SAFE_NO_PAD.encode(r#"{"alg":"RS256","typ":"JWT"}"#);
-        let payload = BASE64_URL_SAFE_NO_PAD.encode(
-            format!(r#"{{"_id":"test","exp":{},"iat":{}}}"#, exp_later, exp_later - 300)
-        );
+        let payload = BASE64_URL_SAFE_NO_PAD.encode(format!(
+            r#"{{"_id":"test","exp":{},"iat":{}}}"#,
+            exp_later,
+            exp_later - 300
+        ));
         let token = format!("{}.{}.fakesig", header, payload);
-        assert!(!is_token_expired(&token), "Token expiring in 60s should still be valid");
+        assert!(
+            !is_token_expired(&token),
+            "Token expiring in 60s should still be valid"
+        );
     }
 }
